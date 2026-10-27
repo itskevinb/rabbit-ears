@@ -9,7 +9,7 @@ Clips come from archive.org once, shrunk to 320 px, into the cache.
 
 The web page (tools/web/index.html, LAN only, no sign-in) shows what's on
 with a live thumbnail and has the remote: skip, play a show now, stand by,
-test pattern, sign off; the lineup editor with an archive.org search; and
+test pattern, sign off, mute; the lineup editor with an archive.org search; and
 the picture/sound settings. "Play next" queues shows ahead of the lineup. Lineup and settings live in the cache folder
 (CHANNEL4_CACHE, default ./cache), seeded from tools/lineup.json.
 
@@ -27,7 +27,7 @@ CACHE = Path(os.environ.get("CHANNEL4_CACHE", HERE.parent / "cache"))
 CACHE.mkdir(parents=True, exist_ok=True)
 flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] if a.startswith("--")}
 
-DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0}
+DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False}
 
 
 def load(name, default):
@@ -235,6 +235,8 @@ class Station:
         if self.pending_setup:  # settings go down the same connection, from this thread
             self.pending_setup = False
             self.tv.send(self.tv.setup)
+        if self.settings["muted"]:  # silence, not no carrier: the set stays quiet instead of buzzing
+            mulaw = bytes([SILENCE]) * len(mulaw)
         self.tv.send(packet(gray, mulaw))
         self.frame = gray
 
@@ -414,6 +416,10 @@ class Station:
             self.queue = []
             save("queue.json", self.queue)
 
+    def set_muted(self, muted):
+        self.settings = {**self.settings, "muted": bool(muted)}
+        save("settings.json", self.settings)
+
     def remove_cached(self, key):
         show = self.find(key)
         if show:
@@ -485,6 +491,8 @@ class Remote(BaseHTTPRequestHandler):
                 station.queue_remove(int(b.get("index", -1)))
             elif path == "/api/queue/clear":
                 station.queue_clear()
+            elif path == "/api/mute":
+                station.set_muted(b.get("muted", not station.settings["muted"]))
             elif path == "/api/uncache":
                 station.remove_cached(b.get("slug", ""))
             else:

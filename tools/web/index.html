@@ -83,6 +83,7 @@
     <h2>Remote</h2>
     <div class="buttons">
       <button class="primary" onclick="post('/api/skip')">Skip ⏭</button>
+      <button id="mute" onclick="post('/api/mute', {muted: !state.settings.muted}).then(s => s && toast(s.settings.muted ? 'Muted' : 'Sound on'))">Mute</button>
       <button onclick="mode('lineup')">Back to the lineup</button>
       <button onclick="mode('standby')">Please stand by</button>
       <button onclick="mode('testcard')">Test pattern</button>
@@ -188,6 +189,8 @@ function render() {
     $('progress').style.width = s.length ? Math.min(100, 100 * s.pos / s.length) + '%' : '0';
   }
   $('upNext').textContent = s.mode === 'lineup' && s.upcoming ? 'Up next: ' + s.upcoming.title : '';
+  $('mute').textContent = s.settings.muted ? '🔇 Muted · unmute' : '🔊 Mute';
+  $('mute').classList.toggle('primary', !!s.settings.muted);
   renderQueue();
   renderLineup();
   if (!settingsDirty) loadSettings();
