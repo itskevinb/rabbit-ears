@@ -12,9 +12,9 @@ flags, anywhere:
     --no-dither      static line pattern instead of per-field dither
     --cleanup=strong|light|off   hiss/click removal on the sound (default strong)
 
-The Channel 4 service on the station box streams to the same board, and a new stream
-takes the TV over: stop it first (the web page's Sign off button, or
-`ssh root@station.lan systemctl stop channel4`).
+If the Channel 4 station (station.py) is streaming to the same board, a new
+stream takes the TV over: stop it first (the web page's Sign off button, or
+`systemctl stop channel4` where it runs).
 Over USB, the board reports "#q N" (slots in use, of 3) and we send while N
 plus what we've sent since that report is under 3.
 """

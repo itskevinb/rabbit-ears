@@ -13,7 +13,7 @@ test pattern, sign off, mute, volume; the lineup editor with an archive.org sear
 the picture/sound settings. "Play next" queues shows ahead of the lineup. Lineup and settings live in the cache folder
 (CHANNEL4_CACHE, default ./cache), seeded from tools/lineup.json.
 
-Runs 24/7 as channel4.service on a Linux container: deploy/.
+Runs 24/7 as a systemd service on any small Linux box: see deploy/.
 """
 import io, json, os, random, subprocess, sys, threading, time, urllib.parse, urllib.request
 from datetime import datetime

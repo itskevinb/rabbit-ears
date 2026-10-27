@@ -1,3 +1,5 @@
 rf-tv/picture.png
 rf-video/wifi_secrets.h
 cache/
+deploy/host
+__pycache__/

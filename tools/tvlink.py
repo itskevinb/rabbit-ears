@@ -56,7 +56,7 @@ def video_filter(fps, brightness=0.0, contrast=1.0):
 # Cleanup of old prints, before the compressor (which would otherwise lift the
 # hiss with the quiet dialogue). Measured on a Three Stooges short: pauses
 # drop ~4 dB with light, ~27 dB with strong, speech level unchanged; strong
-# runs ~3x real time on the station box, light ~12x.
+# runs ~3x real time on a 2-core container, light ~12x.
 CLEANUP = {
     "off": "",
     "light": "adeclick,afftdn=nr=12:nf=-35:tn=1,",
