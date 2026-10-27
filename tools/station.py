@@ -195,14 +195,18 @@ class Station:
         try:
             url = f"https://archive.org/download/{urllib.parse.quote(show['item'])}/{urllib.parse.quote(show['file'])}"
             tmp = out.with_suffix(".part.mp4")
-            print(f"fetching {show['title']}", flush=True)
-            r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
-                                "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
-                                "-i", url, "-vf", "scale=320:-2", "-ac", "1", "-c:v", "libx264", "-preset", "veryfast",
-                                "-crf", "26", "-c:a", "aac", str(tmp)])
-            if r.returncode != 0:
-                print(f"fetch failed: {show['title']}", flush=True)
+            for attempt, wait in enumerate((0, 5, 20)):  # archive.org throws the odd 5XX
+                time.sleep(wait)
+                print(f"fetching {show['title']}" + (f" (try {attempt + 1})" if attempt else ""), flush=True)
+                r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
+                                    "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
+                                    "-i", url, "-vf", "scale=320:-2", "-ac", "1", "-c:v", "libx264", "-preset", "veryfast",
+                                    "-crf", "26", "-c:a", "aac", str(tmp)])
+                if r.returncode == 0:
+                    break
                 tmp.unlink(missing_ok=True)
+            else:
+                print(f"fetch failed: {show['title']}", flush=True)
                 return None
             tmp.rename(out)
             self.duration(show)
@@ -310,8 +314,10 @@ class Station:
                               until=lambda: done.is_set() or self.interrupted())
                     if self.interrupted():
                         raise Interrupted
-                path = self.fetch(current)
-                if path is None:
+                # Never download from this thread: the TV gets no frames while it
+                # waits (a slow retry once left the screen frozen for minutes).
+                path = self.path(current) if self.path(current).exists() else None
+                if path is None:  # couldn't get it: move on rather than hang
                     current = None
                     continue
                 print(f"{datetime.now():%H:%M} now: {current['title']}", flush=True)
