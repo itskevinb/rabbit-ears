@@ -31,7 +31,10 @@ vf = (f"fps={FPS},scale={W}:{H}:force_original_aspect_ratio=decrease,"
       f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,format=gray")
 video = subprocess.Popen(["ffmpeg", "-loglevel", "error", *vin, *limit, "-vf", vf, "-an",
                           "-f", "rawvideo", "-"], stdout=subprocess.PIPE)
-af = "highpass=f=120,lowpass=f=3400,dynaudnorm,aemphasis=mode=production:type=75fm,alimiter=limit=0.9"
+# Film mixes are quiet; squash them hard so the sound uses the full +/-25 kHz.
+af = ("highpass=f=120,lowpass=f=3400,"
+      "acompressor=threshold=-28dB:ratio=6:attack=5:release=150:makeup=4,dynaudnorm=p=0.9:m=40,"
+      "aemphasis=mode=production:type=75fm,volume=9dB,alimiter=limit=0.95")
 audio = subprocess.run(["ffmpeg", "-loglevel", "error", *ain, *limit, "-vn", "-ac", "1",
                         "-ar", str(AUD * FPS), "-af", af, "-f", "s8", "-"],
                        stdout=subprocess.PIPE, check=True).stdout
