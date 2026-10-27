@@ -1,17 +1,145 @@
 {
   "day": [
-    {"title": "Superman: The Mechanical Monsters", "year": 1941, "item": "superman_the_mechanical_monsters", "file": "superman_the_mechanical_monsters_512kb.mp4"},
-    {"title": "Popeye Meets Sindbad the Sailor", "year": 1936, "item": "POPEYEMeetsSindbadTheSailor1936", "file": "POPEYE meets Sindbad The Sailor (1936).mp4"},
-    {"title": "Falling Hare", "year": 1943, "item": "falling-hare-1943-restored", "file": "S09E002_Falling Hare.ia.mp4"},
-    {"title": "The Wacky Wabbit", "year": 1942, "item": "the-wacky-wabbit", "file": "The Wacky Wabbit.ia.mp4"},
-    {"title": "Case of the Missing Hare", "year": 1942, "item": "BugsBunnyCaseOfTheMissingHare", "file": "Merrie Melodies - Bugs Bunny - Case Of The Missing Hare (1942)-dyQ4EntAyhc.mp4"},
-    {"title": "The Three Stooges: Disorder in the Court", "year": 1936, "item": "disorder_in_the_court", "file": "disorder_in_the_court_512kb.mp4"},
-    {"title": "The Three Stooges: Brideless Groom", "year": 1947, "item": "brideless_groom", "file": "brideless_groom_512kb.mp4"}
+    {
+      "title": "Superman: The Mechanical Monsters",
+      "year": 1941,
+      "item": "superman_the_mechanical_monsters",
+      "file": "superman_the_mechanical_monsters_512kb.mp4"
+    },
+    {
+      "title": "Popeye Meets Sindbad the Sailor",
+      "year": 1936,
+      "item": "POPEYEMeetsSindbadTheSailor1936",
+      "file": "POPEYE meets Sindbad The Sailor (1936).mp4"
+    },
+    {
+      "title": "Falling Hare",
+      "year": 1943,
+      "item": "falling-hare-1943-restored",
+      "file": "S09E002_Falling Hare.ia.mp4"
+    },
+    {
+      "title": "The Wacky Wabbit",
+      "year": 1942,
+      "item": "the-wacky-wabbit",
+      "file": "The Wacky Wabbit.ia.mp4"
+    },
+    {
+      "title": "Case of the Missing Hare",
+      "year": 1942,
+      "item": "BugsBunnyCaseOfTheMissingHare",
+      "file": "Merrie Melodies - Bugs Bunny - Case Of The Missing Hare (1942)-dyQ4EntAyhc.mp4"
+    },
+    {
+      "title": "The Three Stooges: Disorder in the Court",
+      "year": 1936,
+      "item": "disorder_in_the_court",
+      "file": "disorder_in_the_court_512kb.mp4"
+    },
+    {
+      "title": "The Three Stooges: Brideless Groom",
+      "year": 1947,
+      "item": "brideless_groom",
+      "file": "brideless_groom_512kb.mp4"
+    },
+    {
+      "title": "Steamboat Willie",
+      "year": 1928,
+      "item": "steamboat-willie_1928",
+      "file": "steamboat-willie_1928.ia.mp4"
+    },
+    {
+      "title": "Flip the Frog: Fiddlesticks",
+      "year": 1930,
+      "item": "FLIP_FROG-FIDDLESTICKS",
+      "file": "FLIP_FROG-FIDDLESTICKS_256k.mp4"
+    },
+    {
+      "title": "Felix the Cat in April Maze",
+      "year": 1930,
+      "item": "FelixAprilMaze",
+      "file": "felix_april_maze_instr_512kb.mp4"
+    },
+    {
+      "title": "Superman: The Bulleteers",
+      "year": 1942,
+      "item": "superman_bulleteers",
+      "file": "bulleteers.mp4"
+    },
+    {
+      "title": "Superman: Arctic Giant",
+      "year": 1942,
+      "item": "superman_arctic_giant",
+      "file": "arctic_giant.mp4"
+    },
+    {
+      "title": "Superman: Billion Dollar Limited",
+      "year": 1942,
+      "item": "superman_billion_dollar_limited",
+      "file": "billion_dollar_limited.mp4"
+    },
+    {
+      "title": "Popeye Meets Ali Baba's Forty Thieves",
+      "year": 1937,
+      "item": "PopeyeAliBabaRestored512kb",
+      "file": "PopeyeAliBabaRestored_512kb.mp4"
+    },
+    {
+      "title": "Fresh Hare",
+      "year": 1942,
+      "item": "FreshHare_201409",
+      "file": "FreshHare.mp4"
+    },
+    {
+      "title": "Super-Rabbit",
+      "year": 1943,
+      "item": "super-rabbit-1943-restored",
+      "file": "S09E003_Super Rabbit.ia.mp4"
+    },
+    {
+      "title": "Hare Ribbin'",
+      "year": 1944,
+      "item": "1944-e-15a.-hare-ribbin-bugs-433a-hd",
+      "file": "1944E15a. Hare Ribbin' (Bugs)(433a)[HD].ia.mp4"
+    },
+    {
+      "title": "Bugs Bunny Nips the Nips",
+      "year": 1944,
+      "item": "135321301",
+      "file": "Untitled video - Made with Clipchamp (58).ia.mp4"
+    }
   ],
   "night": [
-    {"title": "Night of the Living Dead", "year": 1968, "item": "night_of_the_living_dead_dvd", "file": "Night.mp4"},
-    {"title": "Nosferatu", "year": 1922, "item": "Nosferatu_most_complete_version_93_mins.", "file": "Nosferatu_1922_Symphony_of_Horror_512kb.mp4"},
-    {"title": "Carnival of Souls", "year": 1962, "item": "CarnivalofSouls", "file": "CarnivalOfSouls_512kb.mp4"}
+    {
+      "title": "Night of the Living Dead",
+      "year": 1968,
+      "item": "night_of_the_living_dead_dvd",
+      "file": "Night.mp4"
+    },
+    {
+      "title": "Nosferatu",
+      "year": 1922,
+      "item": "Nosferatu_most_complete_version_93_mins.",
+      "file": "Nosferatu_1922_Symphony_of_Horror_512kb.mp4"
+    },
+    {
+      "title": "Carnival of Souls",
+      "year": 1962,
+      "item": "CarnivalofSouls",
+      "file": "CarnivalOfSouls_512kb.mp4"
+    },
+    {
+      "title": "The Skeleton Dance",
+      "year": 1929,
+      "item": "the-skeleton-dance-1929-restored",
+      "file": "The Skeleton Dance.ia.mp4"
+    },
+    {
+      "title": "The Haunted House",
+      "year": 1929,
+      "item": "the-haunted-house-1929",
+      "file": "The Haunted House (1929).mp4"
+    }
   ],
   "night_starts": 21,
   "night_ends": 6

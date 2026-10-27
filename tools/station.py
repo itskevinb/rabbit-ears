@@ -10,7 +10,7 @@ Clips come from archive.org once, shrunk to 320 px, into the cache.
 The web page (tools/web/index.html, LAN only, no sign-in) shows what's on
 with a live thumbnail and has the remote: skip, play a show now, stand by,
 test pattern, sign off; the lineup editor with an archive.org search; and
-the picture/sound settings. Lineup and settings live in the cache folder
+the picture/sound settings. "Play next" queues shows ahead of the lineup. Lineup and settings live in the cache folder
 (CHANNEL4_CACHE, default ./cache), seeded from tools/lineup.json.
 
 Runs 24/7 as channel4.service on a Linux container: deploy/.
@@ -136,6 +136,7 @@ class Station:
         self.mode = "lineup"            # lineup | standby | testcard | off
         self.now = self.upcoming = None  # shows
         self.override = None             # "play now" pick
+        self.queue = load("queue.json", [])  # "play next" picks, in order, ahead of the lineup
         self.skip = self.reopen = False
         self.pending_setup = False       # new sound/dither commands to send
         self.frame = channel_card()      # last grey frame sent, for the thumbnail
@@ -289,12 +290,17 @@ class Station:
                     if self.override is not None:
                         current, self.override = self.override, None
                     self.skip = False
+                if current is None:
+                    with self.lock:
+                        if self.queue:
+                            current = self.queue.pop(0)
+                            save("queue.json", self.queue)
                 current = current or self.pick()
                 if current is None:
                     self.hold(channel_card(("NO SHOWS IN THE LINEUP", 14, 230)), seconds=5)
                     continue
                 self.now, self.pos, self.length = current, 0.0, self.duration(current)
-                self.upcoming = self.pick(avoid=current)
+                self.upcoming = self.queue[0] if self.queue else self.pick(avoid=current)
                 if self.upcoming:
                     threading.Thread(target=self.fetch, args=(self.upcoming,), daemon=True).start()
                 if not self.path(current).exists():  # first time: stand by while it downloads
@@ -314,11 +320,12 @@ class Station:
                 if self.interrupted():
                     raise Interrupted
                 self.play(current, path)
-                current = self.upcoming
+                current = None if self.queue else self.upcoming  # the queue goes first
             except Interrupted:
                 # Skip goes to the show the page says is up next; "play now" and
                 # mode changes are picked up at the top of the loop.
-                current = self.upcoming if self.skip and self.override is None and self.mode == "lineup" else None
+                skipping = self.skip and self.override is None and self.mode == "lineup" and not self.queue
+                current = self.upcoming if skipping else None
             except Exception as e:  # keep the station on the air whatever happens
                 print(f"station error: {e!r}", flush=True)
                 current = None
@@ -328,7 +335,9 @@ class Station:
     def state(self):
         show = lambda s: s and {**s, "slug": slug(s), "cached": self.path(s).exists()}
         lineup = {k: [show(s) for s in self.lineup.get(k, [])] for k in ("day", "night")}
-        return {"mode": self.mode, "block": self.block(), "now": show(self.now), "upcoming": show(self.upcoming),
+        upcoming = self.queue[0] if self.queue else self.upcoming
+        return {"mode": self.mode, "block": self.block(), "now": show(self.now), "upcoming": show(upcoming),
+                "queue": [show(q) for q in self.queue],
                 "pos": round(self.pos), "length": round(self.length), "settings": self.settings,
                 "lineup": {**self.lineup, **lineup}, "fetching": sorted(self.fetching),
                 "clock": datetime.now().strftime("%H:%M")}
@@ -377,6 +386,27 @@ class Station:
             self.pending_setup = True
         if picture:
             self.reopen = True
+
+    def queue_add(self, keys):
+        """Play these next, in order, after anything already queued."""
+        shows = [s for s in (self.find(k) for k in keys) if s]
+        with self.lock:
+            self.queue += shows
+            save("queue.json", self.queue)
+        if shows:  # start downloading the first one now
+            threading.Thread(target=self.fetch, args=(self.queue[0],), daemon=True).start()
+        return len(shows)
+
+    def queue_remove(self, index):
+        with self.lock:
+            if 0 <= index < len(self.queue):
+                self.queue.pop(index)
+            save("queue.json", self.queue)
+
+    def queue_clear(self):
+        with self.lock:
+            self.queue = []
+            save("queue.json", self.queue)
 
     def remove_cached(self, key):
         show = self.find(key)
@@ -442,6 +472,13 @@ class Remote(BaseHTTPRequestHandler):
                 station.set_lineup(b)
             elif path == "/api/settings":
                 station.set_settings(b)
+            elif path == "/api/queue":
+                if not station.queue_add(b.get("slugs") or [b.get("slug", "")]):
+                    return self.reply(404, {"error": "no such show"})
+            elif path == "/api/queue/remove":
+                station.queue_remove(int(b.get("index", -1)))
+            elif path == "/api/queue/clear":
+                station.queue_clear()
             elif path == "/api/uncache":
                 station.remove_cached(b.get("slug", ""))
             else:

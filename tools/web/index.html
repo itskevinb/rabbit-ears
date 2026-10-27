@@ -91,6 +91,12 @@
     <p class="note">The test pattern is for tuning: turn the fine tuning until the wedges at the bottom are sharpest.</p>
   </section>
 
+  <section id="queueBox" style="display:none">
+    <h2>Playing next</h2>
+    <ul id="queue"></ul>
+    <div class="buttons" style="margin-top:10px"><button onclick="post('/api/queue/clear').then(s => s && toast('Queue cleared'))">Clear the queue</button></div>
+  </section>
+
   <section>
     <h2>Lineup</h2>
     <div class="tabs">
@@ -182,6 +188,7 @@ function render() {
     $('progress').style.width = s.length ? Math.min(100, 100 * s.pos / s.length) + '%' : '0';
   }
   $('upNext').textContent = s.mode === 'lineup' && s.upcoming ? 'Up next: ' + s.upcoming.title : '';
+  renderQueue();
   renderLineup();
   if (!settingsDirty) loadSettings();
 }
@@ -197,6 +204,7 @@ function renderLineup() {
     return `<li class="show${playing ? ' playing' : ''}"><div class="name">${esc(s.title)}${s.year ? ' (' + esc(s.year) + ')' : ''}
       <small>${playing ? 'on now · ' : ''}${status}</small></div><div class="actions">
       <button class="small" onclick="playNow('${s.slug}')">Play now</button>
+      <button class="small" onclick="playNext('${s.slug}')">Play next</button>
       <button class="small" onclick="move(${i},-1)" ${i ? '' : 'disabled'}>↑</button>
       <button class="small" onclick="move(${i},1)" ${i < list.length - 1 ? '' : 'disabled'}>↓</button>
       <button class="small" onclick="swapBlock(${i})">To ${other}</button>
@@ -223,6 +231,14 @@ function saveLineup(patch, msg) {
   return post('/api/lineup', l).then(s => s && msg && toast(msg));
 }
 function playNow(slug) { post('/api/play', {slug}).then(s => s && toast('Switching…')); }
+function playNext(slug) { post('/api/queue', {slug}).then(s => s && toast('Queued')); }
+function renderQueue() {
+  const q = state.queue || [];
+  $('queueBox').style.display = q.length ? 'block' : 'none';
+  $('queue').innerHTML = q.map((s, i) => `<li class="show"><div class="name">${i + 1}. ${esc(s.title)}${s.year ? ' (' + esc(s.year) + ')' : ''}
+    <small>${state.fetching.includes(s.slug) ? 'downloading…' : s.cached ? 'ready' : 'downloads when it comes up'}</small></div>
+    <div class="actions"><button class="small" onclick="post('/api/queue/remove', {index: ${i}})">Remove</button></div></li>`).join('');
+}
 function move(i, d) { saveLineup(l => { const a = l[tab]; [a[i], a[i + d]] = [a[i + d], a[i]]; }); }
 function swapBlock(i) { const to = tab === 'day' ? 'night' : 'day'; saveLineup(l => l[to].push(...l[tab].splice(i, 1)), 'Moved'); }
 function removeShow(i) {
