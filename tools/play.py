@@ -2,6 +2,8 @@
 
     python3 tools/play.py clip.mp4 [start_seconds] [duration_seconds]
     python3 tools/play.py test [start] [duration]   # moving test pattern + a little tune
+    flags, anywhere: --new-sound (noise-shaped FM, garbled on the real set),
+                     --no-dither (static line pattern)
 
 ffmpeg turns the clip into 128x96 4-bit grey at 10 fps and mono audio at
 7810 Hz (781 samples per frame, which the board plays at 7812.5 Hz) with
@@ -14,10 +16,13 @@ import serial
 W, H, FPS, AUD, NQ = 128, 96, 10, 781, 4
 PORT = "/dev/cu.usbserial-0001"
 MAGIC = bytes([0xA5, 0x5A, ord("V"), ord("1")])
+cmd = lambda letter: bytes([0xA5, 0x5A, ord("C"), ord(letter)])
 
-src = sys.argv[1]
-start = sys.argv[2] if len(sys.argv) > 2 else "0"
-dur = sys.argv[3] if len(sys.argv) > 3 else None
+flags = {a for a in sys.argv[1:] if a.startswith("--")}
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+src = args[0]
+start = args[1] if len(args) > 1 else "0"
+dur = args[2] if len(args) > 2 else None
 if src == "test":
     vin = ["-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10"]
     ain = ["-f", "lavfi", "-i", "aevalsrc=0.8*sin(2*PI*t*(330+110*floor(mod(t*2\\,4))))"]
@@ -45,12 +50,13 @@ audio = subprocess.run(["ffmpeg", "-loglevel", "error", *ain, *limit, "-vn", "-a
 port = serial.Serial(PORT, 921600, timeout=0.05)
 time.sleep(2)  # opening the port may reset the board; let that boot finish
 port.reset_input_buffer()
-port.write(b"H")  # restart clean
+port.write(cmd("H"))  # restart clean
 out, t0 = b"", time.time()
 while b"#ready" not in out and time.time() - t0 < 5:
     out += port.read(256)
 if b"#ready" not in out:
     sys.exit("board didn't answer")
+port.write(cmd("N" if "--new-sound" in flags else "O") + cmd("d" if "--no-dither" in flags else "D"))
 
 queued, sent_since, frame_no, pending = NQ, 0, 0, b""
 while True:

@@ -5,16 +5,24 @@
 //   picture  I2S0 -> D4: pulse train at R/2 = 13.5 MHz, 5th harmonic 67.5 MHz.
 //            Pulses are dropped (first-order sigma-delta) to set the carrier
 //            strength; NTSC negative modulation, non-interlaced 262 x 64 us.
-//   sound    I2S1 -> D5: pulse train near R/3 = 9 MHz, 8th harmonic 72.0 MHz
-//            (+4.5 MHz). FM: each pulse lands where an exact phase accumulator
-//            says, so nudging the pulse spacing moves the 72 MHz line by up to
-//            +/-25 kHz. The bit grid quantizes the timing; that error is
-//            phase noise spread over megahertz, mostly outside the audio band.
+//   sound    I2S1 -> D5: 3-bit frames at R/3 = 9 MHz whose 8th-harmonic image
+//            is 72.0 MHz (+4.5 MHz). One bit moves the 72 MHz phase by 240
+//            degrees, so the 6 one- and two-pulse frames (100 110 010 011 001
+//            101) give phases in 60-degree steps. FM (+/-25 kHz) = a phase
+//            accumulator, quantized to those steps with first-order error
+//            feedback, which pushes the error away from the audio band.
+//            Simulated: audio SNR ~70 dB. On the real set it was worse: loud
+//            garbled sound. The shaped error lands between the sound and
+//            picture carriers, and the set's intercarrier detector mixes it
+//            with the sound carrier straight into the 4.5 MHz sound IF, which
+//            the simulation didn't model. So it's off by default; command 'N'
+//            turns it on, 'O' back to the first method (one pulse per cycle at
+//            the nearest bit), which sounds fine on the set.
 // Both streams are generated live, one line (picture) or one audio sample
 // (sound) at a time, on separate cores.
 //
 // Serial protocol (921600 baud, the CP2102's limit is ~1 Mbaud): the Mac
-// sends 'H' and the board restarts clean (opening the port may or may not
+// sends command H (see loop()) and the board restarts clean (opening the port may or may not
 // reset it) and prints "#ready". It then reports "#q N" (packet slots in use)
 // whenever a slot frees and every 200 ms; the Mac keeps the queue topped up.
 // (Single-byte credits didn't survive: the board-to-Mac line picks up RF junk
@@ -63,7 +71,13 @@ const int PAL_SYNC = VID_W, PAL_BLACK = VID_W + 1;
 uint8_t slot_src[SLOTS];
 int16_t row_of_line[LINES];  // picture row for a line, -1 outside
 uint32_t blank_line[LINE_WORDS], vsync_line[LINE_WORDS];
-uint32_t sound_step[256];    // pulse spacing per audio sample value
+uint32_t sound_step[256];    // old method: pulse spacing per audio sample value
+uint32_t sound_dphase[256];  // new method: phase step per frame, 2^32 = one turn
+const uint32_t PHASE60 = 715827883;  // 2^32 / 6
+const uint8_t PHASE_PATTERN[6] = {0b100, 0b110, 0b010, 0b011, 0b001, 0b101};  // 0, 60 .. 300 deg
+uint8_t q_of_top[256];  // nearest 60-degree step, from the top 8 bits of (phase + 30 degrees)
+uint32_t phase_of_q[6];
+volatile bool new_sound = false, line_dither = true;
 
 // Fast path for picture lines (the slot-by-slot pass took ~92% of a core and
 // sometimes missed the deadline, which drops the carrier and breaks sync).
@@ -166,6 +180,11 @@ void build_tables() {
   for (int i = 0; i < 256; i++) {
     float dev = (int8_t)i / 128.0f * 25000.0f;
     sound_step[i] = (uint32_t)(3.0f * (1 << 20) / (1.0f + dev / 72e6f) + 0.5f);
+    sound_dphase[i] = (uint32_t)(int32_t)(dev / 9e6f * 4294967296.0f);
+  }
+  for (int i = 0; i < 256; i++) q_of_top[i] = i * 6 / 256;
+  for (int q = 0; q < 6; q++) {
+    phase_of_q[q] = q * PHASE60;
   }
 }
 
@@ -183,7 +202,11 @@ void slow_picture_line(const uint8_t *rp, uint32_t *w) {
 
 void IRAM_ATTR fast_picture_line(const uint8_t *rp, uint32_t *w) {
   memcpy(w, prefix, prefix_words * 4);
-  int nw = prefix_words, nbits = prefix_tail_bits, acc = prefix_acc;
+  // A random start for the sigma-delta on each line, new every field, turns the
+  // fixed fine stripes into grain that changes 60 times a second.
+  static uint32_t rng = 1;
+  rng = rng * 1664525u + 1013904223u;
+  int nw = prefix_words, nbits = prefix_tail_bits, acc = line_dither ? rng >> 24 : prefix_acc;
   uint64_t bits = prefix_tail;
   for (int x = 0; x < VID_W; x++) {
     int v = (x & 1) ? rp[x >> 1] & 15 : rp[x >> 1] >> 4;
@@ -222,12 +245,14 @@ void self_test() {
   uint8_t row[VID_W / 2];
   uint32_t a[LINE_WORDS], b[LINE_WORDS];
   int bad = 0;
+  line_dither = false;  // the reference starts every line from the same state
   for (int t = 0; t < 50; t++) {
     for (int i = 0; i < VID_W / 2; i++) row[i] = esp_random();
     slow_picture_line(row, a);
     fast_picture_line(row, b);
     bad += memcmp(a, b, sizeof(a)) != 0;
   }
+  line_dither = true;
   Serial.printf("#selftest %s (%d of 50 rows differ)\n", bad ? "fail" : "ok", bad);
 }
 
@@ -254,6 +279,36 @@ void report_queue() {
   Serial.printf("#q %d\n", n);
 }
 
+// New-method sound for one audio sample: 1152 frames of 3 bits, decided in
+// pairs (the same pattern twice), so 4.5 million decisions a second. Deciding
+// every frame took more than the whole core and starved the serial link;
+// pairs simulate the same (~70 dB audio SNR) with slightly less leakage into
+// the picture.
+void IRAM_ATTR make_sound_block(uint32_t dphase, uint32_t *buf, uint32_t &phase, uint32_t &err) {
+  uint32_t ph = phase, e = err, acc = 0;
+  int n = 0, nw = 0;
+  uint32_t dpair = dphase * 2;
+  for (int k = 0; k < SOUND_BLOCK_BITS / 6; k++) {
+    ph += dpair;
+    uint32_t u = ph - e;  // wanted phase, minus last pair's error
+    uint32_t q = q_of_top[(u + PHASE60 / 2) >> 24];
+    e = phase_of_q[q] - u;
+    uint32_t pat = PHASE_PATTERN[q] * 9;  // the 3-bit pattern twice: p << 3 | p
+    if (n <= 26) {
+      acc = (acc << 6) | pat;
+      n += 6;
+      if (n == 32) buf[nw++] = acc, acc = 0, n = 0;
+    } else {  // the pair straddles two words
+      int spill = n + 6 - 32;
+      buf[nw++] = (acc << (6 - spill)) | (pat >> spill);
+      acc = pat & ((1u << spill) - 1);
+      n = spill;
+    }
+  }
+  phase = ph;
+  err = e;
+}
+
 // Put packet n's picture up; the one it replaces is off screen, so free it.
 void show(int n) {
   int old = showing;
@@ -266,7 +321,8 @@ void show(int n) {
 
 void sound_task(void *) {
   static uint32_t buf[SOUND_BLOCK_WORDS];
-  uint32_t pos = 0;  // next pulse, bits from block start, 12.20 fixed point
+  uint32_t pos = 0;  // old method: next pulse, bits from block start, 12.20 fixed point
+  uint32_t phase = 0, err = 0;  // new method
   int playing = -1, idx = 0, next = 0;
   for (;;) {
     if (playing < 0 && full[next]) {  // start, or resume after running dry
@@ -275,15 +331,19 @@ void sound_task(void *) {
       show(playing);
     }
     int8_t sample = playing >= 0 ? queue[playing].audio[idx] : 0;
-    uint32_t step = sound_step[(uint8_t)sample];
     uint32_t t0 = micros();
-    memset(buf, 0, sizeof(buf));
-    while (pos < ((uint32_t)SOUND_BLOCK_BITS << 20)) {
-      uint32_t b = pos >> 20;
-      buf[b >> 5] |= 0x80000000u >> (b & 31);
-      pos += step;
+    if (new_sound) {
+      make_sound_block(sound_dphase[(uint8_t)sample], buf, phase, err);
+    } else {
+      uint32_t step = sound_step[(uint8_t)sample];
+      memset(buf, 0, sizeof(buf));
+      while (pos < ((uint32_t)SOUND_BLOCK_BITS << 20)) {
+        uint32_t b = pos >> 20;
+        buf[b >> 5] |= 0x80000000u >> (b & 31);
+        pos += step;
+      }
+      pos -= SOUND_BLOCK_BITS << 20;
     }
-    pos -= SOUND_BLOCK_BITS << 20;
     sound_busy_us += micros() - t0;
     size_t w;
     i2s_channel_write(sound_tx, buf, sizeof(buf), &w, portMAX_DELAY);
@@ -301,8 +361,10 @@ void setup() {
   self_test();
   pic_tx = start_i2s(I2S_NUM_0, 4);
   sound_tx = start_i2s(I2S_NUM_1, 5);
-  xTaskCreatePinnedToCore(picture_task, "pic", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 0);
-  xTaskCreatePinnedToCore(sound_task, "sound", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 1);
+  // Sound (~82%) gets core 0 to itself; picture (~60%) shares core 1 with
+  // loop(), which receives the serial stream.
+  xTaskCreatePinnedToCore(sound_task, "sound", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 0);
+  xTaskCreatePinnedToCore(picture_task, "pic", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 1);
   Serial.println("#ready");
 }
 
@@ -320,14 +382,25 @@ void loop() {
     pic_busy_us = sound_busy_us = 0;
     last = millis();
   }
+  // Everything from the Mac is framed by A5 5A: "V1" + a packet, or "C" + a
+  // one-letter command. RF from the transmitter wires puts junk on this line
+  // too, and a bare one-byte command got triggered by it.
   static int fill = 0;
-  static const uint8_t magic[4] = {0xA5, 0x5A, 'V', '1'};
-  static int matched = 0;
+  static int matched = 0;  // 0, 1 = saw A5, 2 = saw A5 5A, 3 = saw "V", 4 = saw "V1", 5 = saw "C"
   while (Serial.available()) {
-    if (matched < 4) {
+    if (matched < 4 || matched == 5) {
       int c = Serial.read();
-      if (c == 'H' && matched == 0) ESP.restart();
-      matched = c == magic[matched] ? matched + 1 : (c == magic[0] ? 1 : 0);
+      if (matched == 5) {
+        if (c == 'H') ESP.restart();
+        if (c == 'O' || c == 'N') new_sound = c == 'N';
+        if (c == 'D' || c == 'd') line_dither = c == 'D';
+        matched = 0;
+      } else if (matched == 2 && c == 'C') matched = 5;
+      else if (matched == 2 && c == 'V') matched = 3;
+      else if (matched == 3 && c == '1') matched = 4;
+      else if (matched == 0 && c == 0xA5) matched = 1;
+      else if (matched == 1 && c == 0x5A) matched = 2;
+      else matched = c == 0xA5 ? 1 : 0;
       continue;
     }
     if (full[fill]) return;  // the Mac ran ahead; the packet waits in the RX buffer
