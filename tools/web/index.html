@@ -150,6 +150,12 @@
           <option value="old">Original (distorted)</option>
           <option value="six">Six-phase (garbled on this set)</option>
         </select></div>
+      <div><label for="cleanup">Sound cleanup</label>
+        <select id="cleanup">
+          <option value="strong">Strong: hiss, crackle and clicks (recommended)</option>
+          <option value="light">Light: clicks and some hiss</option>
+          <option value="off">Off: the original track</option>
+        </select></div>
       <div><label for="dither">Moving grain</label>
         <select id="dither"><option value="1">On (smoother)</option><option value="0">Off (fixed stripes)</option></select></div>
     </div>
@@ -303,17 +309,17 @@ const sliders = ['fps', 'brightness', 'contrast'];
 function loadSettings() {
   const s = state.settings;
   for (const k of sliders) { $(k).value = s[k]; $(k + 'V').textContent = s[k]; }
-  $('sound').value = s.sound; $('dither').value = s.dither ? '1' : '0';
+  $('sound').value = s.sound; $('dither').value = s.dither ? '1' : '0'; $('cleanup').value = s.cleanup;
 }
 for (const k of sliders) $(k).oninput = () => { settingsDirty = true; $(k + 'V').textContent = $(k).value; };
-$('sound').onchange = $('dither').onchange = () => { settingsDirty = true; };
+$('sound').onchange = $('dither').onchange = $('cleanup').onchange = () => { settingsDirty = true; };
 function saveSettings() {
   post('/api/settings', {fps: +$('fps').value, brightness: +$('brightness').value, contrast: +$('contrast').value,
-                         sound: $('sound').value, dither: $('dither').value === '1'})
+                         sound: $('sound').value, dither: $('dither').value === '1', cleanup: $('cleanup').value})
     .then(s => { if (s) { settingsDirty = false; toast('Applied'); } });
 }
 function resetSettings() {
-  post('/api/settings', {fps: 24, brightness: 0, contrast: 1, sound: 'w4', dither: true})
+  post('/api/settings', {fps: 24, brightness: 0, contrast: 1, sound: 'w4', dither: true, cleanup: 'strong'})
     .then(s => { if (s) { settingsDirty = false; loadSettings(); toast('Defaults restored'); } });
 }
 

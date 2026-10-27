@@ -10,9 +10,10 @@ flags, anywhere:
     --sound=w4|w2|w1|old|six   FM method, see rf-video.ino; w4 is the best on
                      the real set (clean sound, picture unharmed)
     --no-dither      static line pattern instead of per-field dither
+    --cleanup=strong|light|off   hiss/click removal on the sound (default strong)
 
 The Channel 4 service on the station box streams to the same board, and a new stream
-takes the TV over: stop it first (the web page's Stop button, or
+takes the TV over: stop it first (the web page's Sign off button, or
 `ssh root@station.lan systemctl stop channel4`).
 Over USB, the board reports "#q N" (slots in use, of 3) and we send while N
 plus what we've sent since that report is under 3.
@@ -37,7 +38,7 @@ if src == "test":
                     ["-f", "lavfi", "-i", "aevalsrc=0.8*sin(2*PI*t*(330+110*floor(mod(t*2\\,4))))"],
                     fps=fps, duration=dur or 20)
 else:
-    source = Source.file(src, start, fps=fps, duration=dur)
+    source = Source.file(src, start, fps=fps, duration=dur, cleanup=flags.get("--cleanup") or "strong")
 
 if usb:
     import serial

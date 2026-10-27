@@ -53,17 +53,29 @@ def video_filter(fps, brightness=0.0, contrast=1.0):
             f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,format=gray")
 
 
-# Film mixes are quiet; squash them hard so the sound uses the full +/-25 kHz,
-# then 75 us FM pre-emphasis.
-AUDIO_FILTER = ("highpass=f=100,lowpass=f=7000,"
-                "acompressor=threshold=-28dB:ratio=6:attack=5:release=150:makeup=4,dynaudnorm=p=0.9:m=40,"
-                "aemphasis=mode=production:type=75fm,volume=9dB,alimiter=limit=0.95")
+# Cleanup of old prints, before the compressor (which would otherwise lift the
+# hiss with the quiet dialogue). Measured on a Three Stooges short: pauses
+# drop ~4 dB with light, ~27 dB with strong, speech level unchanged; strong
+# runs ~3x real time on the station box, light ~12x.
+CLEANUP = {
+    "off": "",
+    "light": "adeclick,afftdn=nr=12:nf=-35:tn=1,",
+    "strong": "adeclick,afftdn=nr=20:nf=-30:tn=1,anlmdn=s=4,",
+}
+
+
+def audio_filter(cleanup="strong"):
+    # Film mixes are quiet; squash them hard so the sound uses the full
+    # +/-25 kHz, then 75 us FM pre-emphasis.
+    return ("highpass=f=100,lowpass=f=7000," + CLEANUP[cleanup] +
+            "acompressor=threshold=-28dB:ratio=6:attack=5:release=150:makeup=4,dynaudnorm=p=0.9:m=40,"
+            "aemphasis=mode=production:type=75fm,volume=9dB,alimiter=limit=0.95")
 
 
 class Source:
     """A clip decoded to frames: iterate for (grey frame, mu-law audio) pairs."""
 
-    def __init__(self, inputs_video, inputs_audio, fps, brightness=0.0, contrast=1.0, duration=None):
+    def __init__(self, inputs_video, inputs_audio, fps, brightness=0.0, contrast=1.0, duration=None, cleanup="strong"):
         limit = ["-t", str(duration)] if duration else []
         base = ["ffmpeg", "-nostdin", "-loglevel", "error"]
         self.fps = fps
@@ -72,7 +84,7 @@ class Source:
                                        "-an", "-f", "rawvideo", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         # streamed alongside the video, so a feature film starts right away
         self.audio = subprocess.Popen([*base, *inputs_audio, *limit, "-vn", "-ac", "1", "-ar", str(RATE),
-                                       "-af", AUDIO_FILTER, "-f", "mulaw", "-"], stdout=subprocess.PIPE,
+                                       "-af", audio_filter(cleanup), "-f", "mulaw", "-"], stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL)
 
     @classmethod

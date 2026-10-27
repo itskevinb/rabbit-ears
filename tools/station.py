@@ -20,7 +20,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-from tvlink import H, RATE, SILENCE, SOUND_METHODS, W, Source, TV, audio_share, packet, setup_commands
+from tvlink import CLEANUP, H, RATE, SILENCE, SOUND_METHODS, W, Source, TV, audio_share, packet, setup_commands
 
 HERE = Path(__file__).resolve().parent
 CACHE = Path(os.environ.get("CHANNEL4_CACHE", HERE.parent / "cache"))
@@ -28,7 +28,7 @@ CACHE.mkdir(parents=True, exist_ok=True)
 flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] if a.startswith("--")}
 
 DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False,
-                    "volume": 100}
+                    "volume": 100, "cleanup": "strong"}
 
 
 def ulaw_decode(u):  # G.711, +/-32124
@@ -278,7 +278,8 @@ class Station:
         self.length = self.duration(show)
         while True:
             fps, s = self.settings["fps"], self.settings
-            source = Source.file(path, start, fps=fps, brightness=s["brightness"], contrast=s["contrast"])
+            source = Source.file(path, start, fps=fps, brightness=s["brightness"], contrast=s["contrast"],
+                                 cleanup=s["cleanup"])
             n = 0
             try:
                 for gray, mulaw in source:
@@ -418,7 +419,8 @@ class Station:
         s["dither"] = bool(new.get("dither", s["dither"]))
         s["brightness"] = max(-0.5, min(0.5, float(new.get("brightness", s["brightness"]))))
         s["contrast"] = max(0.3, min(3.0, float(new.get("contrast", s["contrast"]))))
-        picture = any(s[k] != self.settings[k] for k in ("fps", "brightness", "contrast"))
+        s["cleanup"] = new.get("cleanup", s["cleanup"]) if new.get("cleanup") in CLEANUP else s["cleanup"]
+        picture = any(s[k] != self.settings[k] for k in ("fps", "brightness", "contrast", "cleanup"))  # reopen the source
         board = any(s[k] != self.settings[k] for k in ("sound", "dither"))
         self.settings = s
         save("settings.json", s)
