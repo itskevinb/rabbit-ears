@@ -1,5 +1,6 @@
-// ESP32 (classic) analog TV station: video + FM sound streamed from the Mac
-// over USB serial, broadcast on VHF channel 4 with no extra parts.
+// ESP32 (classic) analog TV station: video + FM sound streamed over Wi-Fi
+// (TCP port 5000, mDNS tubetv.local) or USB serial, broadcast on VHF
+// channel 4 with no extra parts.
 //
 // Same RF scheme as rf-tv (see its header), at R = 27 Mbit/s from the APLL:
 //   picture  I2S0 -> D4: pulse train at R/2 = 13.5 MHz, 5th harmonic 67.5 MHz.
@@ -15,27 +16,37 @@
 //            garbled sound. The shaped error lands between the sound and
 //            picture carriers, and the set's intercarrier detector mixes it
 //            with the sound carrier straight into the 4.5 MHz sound IF, which
-//            the simulation didn't model. So it's off by default; command 'N'
-//            turns it on, 'O' back to the first method (one pulse per cycle at
-//            the nearest bit), which sounds fine on the set.
+//            the simulation didn't model. Commands pick the method: 'O' first
+//            method (one pulse per cycle at the nearest bit: distorted), 'N'
+//            this one, 'W'/'X'/'Y' per-word (see make_word_sound_block); 'Y'
+//            is the default and the best on the real set.
 // Both streams are generated live, one line (picture) or one audio sample
 // (sound) at a time, on separate cores.
 //
-// Serial protocol (921600 baud, the CP2102's limit is ~1 Mbaud): the Mac
-// sends command H (see loop()) and the board restarts clean (opening the port may or may not
-// reset it) and prints "#ready". It then reports "#q N" (packet slots in use)
-// whenever a slot frees and every 200 ms; the Mac keeps the queue topped up.
-// (Single-byte credits didn't survive: the board-to-Mac line picks up RF junk
-// from the transmitter wires, and some of it decodes as the credit byte.)
-// Packet format:
-//   A5 5A 56 31 | 6144 B picture (128x96, 4-bit, high nibble = left pixel)
-//               | 781 B audio (int8, 7812.5 Hz = one sample per 2 lines)
+// Stream format, same on both links: everything is framed by A5 5A, either
+//   "C" + one letter: a command (see receive())
+//   "V2" + uint16 LE n | 6144 B picture (128x96, 4-bit, high nibble = left
+//        pixel) | n B audio (mu-law, 15625 Hz = one sample per line; n is
+//        15625 / fps, so any frame rate works)
 // Video and audio play from the same packet, so they stay in sync: a packet's
 // picture goes up when its first audio sample plays.
 //
+// Wi-Fi: TCP's own flow control paces the sender (the board stops reading
+// when its 4 packet slots are full). A new connection takes over and flushes
+// the queue.
+// USB (921600 baud, the CP2102's limit is ~1 Mbaud, so ~10 fps): command H
+// restarts the board clean (opening the port may or may not reset it), and
+// it prints "#ready". It then reports "#q N" (slots in use) whenever a slot
+// frees and every 200 ms; the Mac keeps the queue topped up. (Single-byte
+// credits didn't survive: RF from the transmitter wires puts junk on the
+// serial lines, and some of it decoded as the credit byte.)
+//
 // Hold the wires NEAR the antenna screws, never touching: hot chassis.
 
+#include <ESPmDNS.h>
+#include <WiFi.h>
 #include "driver/i2s_std.h"
+#include "wifi_secrets.h"  // WIFI_SSID, WIFI_PSK; not committed
 
 const uint32_t BIT_RATE = 27000000;
 const int LINE_WORDS = 54, LINE_BITS = LINE_WORDS * 32;  // 1728 bits = 64.0 us
@@ -46,20 +57,22 @@ const float HSYNC_US = 4.7, BACK_PORCH_US = 4.7, FRONT_PORCH_US = 1.5, SAFE = 0.
 const int SYNC = 256, BLACK = 192, WHITE = 32;  // carrier strength, 256 = every pulse
 
 const int VID_W = 128, VID_H = 96, VID_BYTES = VID_W * VID_H / 2;
-const int AUD_PER_PKT = 781;
+const int AUD_MAX = 1600;  // audio samples per packet (10 fps needs 1562)
 const int NQ = 4;
 const int BATCH = 8;  // picture lines per I2S write
 
-const int SOUND_BLOCK_BITS = 2 * LINE_BITS;  // one audio sample
+const int SOUND_BLOCK_BITS = LINE_BITS;  // one audio sample
 const int SOUND_BLOCK_WORDS = SOUND_BLOCK_BITS / 32;
 const uint32_t SOUND_STEP0 = 3u << 20;  // pulse spacing, bits in 12.20 fixed point
 
 struct Packet {
   uint8_t pic[VID_BYTES];
-  int8_t audio[AUD_PER_PKT];
+  uint8_t audio[AUD_MAX];  // mu-law (G.711): ~13-bit quiet-passage quality in 8 bits
+  int n_audio;
 };
 Packet queue[NQ];
 volatile bool full[NQ];
+volatile bool stream_reset;  // set by loop() for a new connection; the sound task empties the queue
 volatile int showing = -1;  // packet whose picture is on screen
 
 i2s_chan_handle_t pic_tx, sound_tx;
@@ -77,7 +90,14 @@ const uint32_t PHASE60 = 715827883;  // 2^32 / 6
 const uint8_t PHASE_PATTERN[6] = {0b100, 0b110, 0b010, 0b011, 0b001, 0b101};  // 0, 60 .. 300 deg
 uint8_t q_of_top[256];  // nearest 60-degree step, from the top 8 bits of (phase + 30 degrees)
 uint32_t phase_of_q[6];
-volatile bool new_sound = false, line_dither = true;
+// Sound method: 0 = one pulse per cycle at the nearest bit, 1 = noise-shaped
+// 6-phase pairs, 2..4 = per-word (see make_word_sound_block), deciding every
+// 1, 2 or 4 words.
+volatile int sound_mode = 4;
+volatile bool line_dither = true;
+const uint32_t PHASE120 = 1431655765;  // 2^32 / 3
+uint32_t word_pattern[3];              // pulses on bits i = r (mod 3) of a word, MSB first
+uint32_t word_dphase[256];             // phase step per 32-bit word
 
 // Fast path for picture lines (the slot-by-slot pass took ~92% of a core and
 // sometimes missed the deadline, which drops the carrier and breaks sync).
@@ -122,6 +142,12 @@ void sigma_delta(const uint8_t *src, const int *pal, uint32_t *w) {
     word = (word << 2) | (bit << 1);  // "10": pulse on the slot's first bit
     if ((s & 15) == 15) w[s >> 4] = word;
   }
+}
+
+int ulaw_to_linear(uint8_t u) {  // G.711, +/-32124
+  u = ~u;
+  int t = (((u & 0x0F) << 3) + 0x84) << ((u >> 4) & 7);
+  return u & 0x80 ? 0x84 - t : t - 0x84;
 }
 
 void build_tables() {
@@ -178,11 +204,16 @@ void build_tables() {
       }
   // 72 MHz = 8 x pulse rate, so a deviation d moves the pulse rate by d/8.
   for (int i = 0; i < 256; i++) {
-    float dev = (int8_t)i / 128.0f * 25000.0f;
+    float dev = ulaw_to_linear(i) / 32768.0f * 25000.0f;  // tables are indexed by the mu-law code
     sound_step[i] = (uint32_t)(3.0f * (1 << 20) / (1.0f + dev / 72e6f) + 0.5f);
     sound_dphase[i] = (uint32_t)(int32_t)(dev / 9e6f * 4294967296.0f);
+    word_dphase[i] = (uint32_t)(int32_t)(dev * 32 / 27e6f * 4294967296.0f);
   }
   for (int i = 0; i < 256; i++) q_of_top[i] = i * 6 / 256;
+  for (int r = 0; r < 3; r++) {
+    word_pattern[r] = 0;
+    for (int i = r; i < 32; i += 3) word_pattern[r] |= 0x80000000u >> i;
+  }
   for (int q = 0; q < 6; q++) {
     phase_of_q[q] = q * PHASE60;
   }
@@ -309,6 +340,30 @@ void IRAM_ATTR make_sound_block(uint32_t dphase, uint32_t *buf, uint32_t &phase,
   err = e;
 }
 
+// Per-word sound: the pulses stay one bit wide, one every 3 bits, and only
+// their offset in the 3-bit grid changes (bit n's 72 MHz phase is 120*n deg,
+// so offset o = phase 120*o). The offset is re-decided every `every` words
+// with first-order error feedback, which pushes the timing error out to
+// ~400 kHz (every word = 844k decisions/s): above the audio, and, with
+// single-bit pulses and few decisions, mostly clear of the picture. Simulated
+// ~43 dB audio SNR to 7 kHz vs ~2 dB for method 0.
+void make_word_sound_block(uint32_t dword, int every, uint32_t *buf, uint32_t &phase, uint32_t &err, int &q) {
+  uint32_t ph = phase, e = err;
+  int grid = 0;  // bit 0 of this word, mod 3 (a block is 3456 bits, a multiple of 3)
+  for (int w = 0; w < SOUND_BLOCK_WORDS; w++) {
+    if (w % every == 0) {
+      ph += dword * every;
+      uint32_t u = ph - e;
+      q = ((u + PHASE120 / 2) >> 8) * 3 >> 24;
+      e = q * PHASE120 - u;
+    }
+    buf[w] = word_pattern[(q - grid + 3) % 3];
+    grid = (grid + 2) % 3;  // 32 = 2 (mod 3)
+  }
+  phase = ph;
+  err = e;
+}
+
 // Put packet n's picture up; the one it replaces is off screen, so free it.
 void show(int n) {
   int old = showing;
@@ -322,17 +377,27 @@ void show(int n) {
 void sound_task(void *) {
   static uint32_t buf[SOUND_BLOCK_WORDS];
   uint32_t pos = 0;  // old method: next pulse, bits from block start, 12.20 fixed point
-  uint32_t phase = 0, err = 0;  // new method
+  uint32_t phase = 0, err = 0;  // method 1
+  uint32_t wphase = 0, werr = 0;  // per-word methods
+  int wq = 0;
   int playing = -1, idx = 0, next = 0;
   for (;;) {
+    if (stream_reset) {
+      playing = -1, next = 0;
+      showing = -1;
+      for (int i = 0; i < NQ; i++) full[i] = false;
+      stream_reset = false;
+    }
     if (playing < 0 && full[next]) {  // start, or resume after running dry
       playing = next;
       idx = 0;
       show(playing);
     }
-    int8_t sample = playing >= 0 ? queue[playing].audio[idx] : 0;
+    uint8_t sample = playing >= 0 ? queue[playing].audio[idx] : 0xFF;  // 0xFF = mu-law zero
     uint32_t t0 = micros();
-    if (new_sound) {
+    if (sound_mode >= 2) {
+      make_word_sound_block(word_dphase[(uint8_t)sample], 1 << (sound_mode - 2), buf, wphase, werr, wq);
+    } else if (sound_mode == 1) {
       make_sound_block(sound_dphase[(uint8_t)sample], buf, phase, err);
     } else {
       uint32_t step = sound_step[(uint8_t)sample];
@@ -347,7 +412,7 @@ void sound_task(void *) {
     sound_busy_us += micros() - t0;
     size_t w;
     i2s_channel_write(sound_tx, buf, sizeof(buf), &w, portMAX_DELAY);
-    if (playing >= 0 && ++idx == AUD_PER_PKT) {
+    if (playing >= 0 && ++idx >= queue[playing].n_audio) {
       next = (playing + 1) % NQ;
       playing = -1;  // picked up at the top of the loop as soon as it's full
     }
@@ -355,7 +420,7 @@ void sound_task(void *) {
 }
 
 void setup() {
-  Serial.setRxBufferSize(32768);
+  Serial.setRxBufferSize(16384);
   Serial.begin(921600);
   build_tables();
   self_test();
@@ -365,7 +430,49 @@ void setup() {
   // loop(), which receives the serial stream.
   xTaskCreatePinnedToCore(sound_task, "sound", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 0);
   xTaskCreatePinnedToCore(picture_task, "pic", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 1);
+  WiFi.mode(WIFI_STA);
+  WiFi.setHostname("tubetv");
+  WiFi.setSleep(false);  // power save adds tens of ms of latency and kills throughput
+  WiFi.begin(WIFI_SSID, WIFI_PSK);
   Serial.println("#ready");
+}
+
+WiFiServer server(5000);
+WiFiClient client;
+int fill = 0;
+
+// Read framed data from one link into free packet slots, in order. Returns
+// when the link has nothing more or the queue is full (for TCP, the unread
+// data then holds the sender back).
+void receive(Stream &in, int &matched) {
+  while (in.available()) {
+    if (matched != 4) {  // 1 = saw A5, 2 = A5 5A, 3 = "V", 4 = "V2", 5 = "C"
+      int c = in.read();
+      if (matched == 5) {
+        if (c == 'H') ESP.restart();
+        if (c == 'O') sound_mode = 0;
+        if (c == 'N') sound_mode = 1;
+        if (c >= 'W' && c <= 'Y') sound_mode = 2 + (c - 'W');
+        if (c == 'D' || c == 'd') line_dither = c == 'D';
+        matched = 0;
+      } else if (matched == 2 && c == 'C') matched = 5;
+      else if (matched == 2 && c == 'V') matched = 3;
+      else if (matched == 3 && c == '2') matched = 4;
+      else if (matched == 0 && c == 0xA5) matched = 1;
+      else if (matched == 1 && c == 0x5A) matched = 2;
+      else matched = c == 0xA5 ? 1 : 0;
+      continue;
+    }
+    if (full[fill]) return;
+    Packet &p = queue[fill];
+    uint16_t n = 0;
+    matched = 0;
+    if (in.readBytes((uint8_t *)&n, 2) != 2 || n > AUD_MAX) continue;
+    if (in.readBytes(p.pic, VID_BYTES) != VID_BYTES || in.readBytes(p.audio, n) != n) continue;
+    p.n_audio = n;
+    full[fill] = true;
+    fill = (fill + 1) % NQ;
+  }
 }
 
 // Receive packets into free slots, in order. Every 5 s, report how busy the
@@ -378,38 +485,30 @@ void loop() {
   }
   if (millis() - last >= 5000) {
     uint32_t span = (millis() - last) * 10;  // percent of the span, in us/100
-    Serial.printf("#load picture %u%% sound %u%%\n", pic_busy_us / span, sound_busy_us / span);
+    Serial.printf("#load picture %u%% sound %u%% heap %u wifi %s\n", pic_busy_us / span, sound_busy_us / span,
+                  ESP.getFreeHeap(), WiFi.localIP().toString().c_str());
     pic_busy_us = sound_busy_us = 0;
     last = millis();
   }
-  // Everything from the Mac is framed by A5 5A: "V1" + a packet, or "C" + a
-  // one-letter command. RF from the transmitter wires puts junk on this line
-  // too, and a bare one-byte command got triggered by it.
-  static int fill = 0;
-  static int matched = 0;  // 0, 1 = saw A5, 2 = saw A5 5A, 3 = saw "V", 4 = saw "V1", 5 = saw "C"
-  while (Serial.available()) {
-    if (matched < 4 || matched == 5) {
-      int c = Serial.read();
-      if (matched == 5) {
-        if (c == 'H') ESP.restart();
-        if (c == 'O' || c == 'N') new_sound = c == 'N';
-        if (c == 'D' || c == 'd') line_dither = c == 'D';
-        matched = 0;
-      } else if (matched == 2 && c == 'C') matched = 5;
-      else if (matched == 2 && c == 'V') matched = 3;
-      else if (matched == 3 && c == '1') matched = 4;
-      else if (matched == 0 && c == 0xA5) matched = 1;
-      else if (matched == 1 && c == 0x5A) matched = 2;
-      else matched = c == 0xA5 ? 1 : 0;
-      continue;
-    }
-    if (full[fill]) return;  // the Mac ran ahead; the packet waits in the RX buffer
-    size_t got = Serial.readBytes((uint8_t *)&queue[fill], sizeof(Packet));
-    matched = 0;
-    if (got == sizeof(Packet)) {
-      full[fill] = true;
-      fill = (fill + 1) % NQ;
-    }
+  static bool serving = false;
+  if (!serving && WiFi.status() == WL_CONNECTED) {
+    MDNS.begin("tubetv");
+    MDNS.addService("tubetv", "tcp", 5000);
+    server.begin();
+    server.setNoDelay(true);
+    serving = true;
+    Serial.printf("#wifi %s\n", WiFi.localIP().toString().c_str());
   }
+  static int usb_matched = 0, tcp_matched = 0;
+  if (serving && server.hasClient()) {  // a new stream takes over
+    client = server.available();
+    client.setNoDelay(true);
+    stream_reset = true;
+    while (stream_reset) delay(1);
+    fill = 0;
+    tcp_matched = 0;
+  }
+  if (client && client.connected()) receive(client, tcp_matched);
+  receive(Serial, usb_matched);
   delay(1);
 }
