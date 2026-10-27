@@ -25,16 +25,21 @@
 //
 // Stream format, same on both links: everything is framed by A5 5A, either
 //   "C" + one letter: a command (see receive())
-//   "V2" + uint16 LE n | 6144 B picture (128x96, 4-bit, high nibble = left
+//   "V2" + uint16 LE n | 24576 B picture (256x192, 4-bit, high nibble = left
 //        pixel) | n B audio (mu-law, 15625 Hz = one sample per line; n is
 //        15625 / fps, so any frame rate works)
+//   "V3" + uint16 LE n + uint16 LE L | L B zlib-compressed picture | n B audio
+//        Wi-Fi uses this: the Arduino build's TCP window is fixed at 5.7 KB,
+//        which with a Wi-Fi round trip caps raw throughput at ~430 KB/s
+//        (measured; 24 fps raw needs ~600). Frames deflate 3-4x, and the
+//        ESP32 has inflate in ROM.
 // Video and audio play from the same packet, so they stay in sync: a packet's
 // picture goes up when its first audio sample plays.
 //
 // Wi-Fi: TCP's own flow control paces the sender (the board stops reading
 // when its 4 packet slots are full). A new connection takes over and flushes
 // the queue.
-// USB (921600 baud, the CP2102's limit is ~1 Mbaud, so ~10 fps): command H
+// USB (921600 baud, the CP2102's limit is ~1 Mbaud, so ~3 fps at 256x192): command H
 // restarts the board clean (opening the port may or may not reset it), and
 // it prints "#ready". It then reports "#q N" (slots in use) whenever a slot
 // frees and every 200 ms; the Mac keeps the queue topped up. (Single-byte
@@ -46,6 +51,7 @@
 #include <ESPmDNS.h>
 #include <WiFi.h>
 #include "driver/i2s_std.h"
+#include "miniz.h"  // ESP32 ROM inflate
 #include "wifi_secrets.h"  // WIFI_SSID, WIFI_PSK; not committed
 
 const uint32_t BIT_RATE = 27000000;
@@ -56,9 +62,9 @@ const float SLOTS_PER_US = BIT_RATE / 2 / 1e6f;
 const float HSYNC_US = 4.7, BACK_PORCH_US = 4.7, FRONT_PORCH_US = 1.5, SAFE = 0.90;
 const int SYNC = 256, BLACK = 192, WHITE = 32;  // carrier strength, 256 = every pulse
 
-const int VID_W = 128, VID_H = 96, VID_BYTES = VID_W * VID_H / 2;
-const int AUD_MAX = 1600;  // audio samples per packet (10 fps needs 1562)
-const int NQ = 4;
+const int VID_W = 256, VID_H = 192, VID_BYTES = VID_W * VID_H / 2;
+const int AUD_MAX = 800;  // audio samples per packet (24 fps needs 651; USB's ~3 fps would need 5208, so USB is for commands now)
+const int NQ = 3;  // 26 KB each; with Wi-Fi up, 4 don't fit
 const int BATCH = 8;  // picture lines per I2S write
 
 const int SOUND_BLOCK_BITS = LINE_BITS;  // one audio sample
@@ -70,18 +76,18 @@ struct Packet {
   uint8_t audio[AUD_MAX];  // mu-law (G.711): ~13-bit quiet-passage quality in 8 bits
   int n_audio;
 };
-Packet queue[NQ];
+Packet *queue[NQ];  // on the heap: 3 x 26 KB is too much for static DRAM
 volatile bool full[NQ];
 volatile bool stream_reset;  // set by loop() for a new connection; the sound task empties the queue
 volatile int showing = -1;  // packet whose picture is on screen
 
 i2s_chan_handle_t pic_tx, sound_tx;
 // Picture lines run one sigma-delta pass over the slots: level = pal[src[slot]],
-// where pal[0..127] holds this line's pixel levels and the last two entries
+// where pal[0..VID_W-1] holds this line's pixel levels and the last two entries
 // are sync and black. Blank and vsync lines never change, so they're
 // prebuilt.
 const int PAL_SYNC = VID_W, PAL_BLACK = VID_W + 1;
-uint8_t slot_src[SLOTS];
+uint16_t slot_src[SLOTS];
 int16_t row_of_line[LINES];  // picture row for a line, -1 outside
 uint32_t blank_line[LINE_WORDS], vsync_line[LINE_WORDS];
 uint32_t sound_step[256];    // old method: pulse spacing per audio sample value
@@ -106,8 +112,9 @@ uint32_t word_dphase[256];             // phase step per 32-bit word
 // acc it leaves: 128 lookups per line instead of ~860 slot steps. The part of
 // the line before the first pixel always starts from acc = 0, so it's
 // prebuilt too.
-const int RUN_MIN = 5, RUN_MAX = 6;
-uint32_t run_lut[16][256][RUN_MAX - RUN_MIN + 1];  // bits << 8 | new acc
+const int RUN_MIN = 2, RUN_MAX = 3;
+uint16_t run_lut[(RUN_MAX - RUN_MIN + 1) << 12];  // [len - RUN_MIN][grey][acc] -> bits << 8 | new acc
+uint16_t run_key[VID_W];                          // (run_len - RUN_MIN) << 12, per pixel
 uint8_t run_len[VID_W];
 int pic_end_slot, prefix_words, prefix_tail_bits, prefix_acc;
 uint32_t prefix[LINE_WORDS], prefix_tail;
@@ -116,7 +123,7 @@ i2s_chan_handle_t start_i2s(i2s_port_t port, int pin) {
   i2s_chan_handle_t h;
   i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(port, I2S_ROLE_MASTER);
   cc.dma_desc_num = 8;
-  cc.dma_frame_num = 500;
+  cc.dma_frame_num = 128;  // 8 x 1024 B = ~2.4 ms of slack; more leaves too little heap for Wi-Fi at 256x192
   ESP_ERROR_CHECK(i2s_new_channel(&cc, &h, NULL));
   i2s_std_config_t sc = {
     .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(BIT_RATE / 64),
@@ -132,7 +139,7 @@ i2s_chan_handle_t start_i2s(i2s_port_t port, int pin) {
   return h;
 }
 
-void sigma_delta(const uint8_t *src, const int *pal, uint32_t *w) {
+void sigma_delta(const uint16_t *src, const int *pal, uint32_t *w) {
   int acc = 0;
   uint32_t word = 0;
   for (int s = 0; s < SLOTS; s++) {
@@ -152,7 +159,7 @@ int ulaw_to_linear(uint8_t u) {  // G.711, +/-32124
 
 void build_tables() {
   float start = HSYNC_US + BACK_PORCH_US, end = SLOTS / SLOTS_PER_US - FRONT_PORCH_US;
-  uint8_t vsync_src[SLOTS];
+  uint16_t vsync_src[SLOTS];
   for (int s = 0; s < SLOTS; s++) {
     float t = s / SLOTS_PER_US;
     float u = ((t - start) / (end - start) - 0.5f) / SAFE + 0.5f;
@@ -175,6 +182,7 @@ void build_tables() {
     run_len[x] = 0;
     while (pic_end_slot < SLOTS && slot_src[pic_end_slot] == x) run_len[x]++, pic_end_slot++;
     if (run_len[x] < RUN_MIN || run_len[x] > RUN_MAX) Serial.printf("#bad run %d at pixel %d\n", run_len[x], x);
+    run_key[x] = (run_len[x] - RUN_MIN) << 12;
   }
   int acc = 0;
   uint32_t word = 0;
@@ -200,7 +208,7 @@ void build_tables() {
           a -= bit << 8;
           bits = (bits << 2) | (bit << 1);
         }
-        run_lut[v][a0][len - RUN_MIN] = bits << 8 | a;
+        run_lut[(len - RUN_MIN) << 12 | v << 8 | a0] = bits << 8 | a;
       }
   // 72 MHz = 8 x pulse rate, so a deviation d moves the pulse rate by d/8.
   for (int i = 0; i < 256; i++) {
@@ -231,36 +239,43 @@ void slow_picture_line(const uint8_t *rp, uint32_t *w) {
   sigma_delta(slot_src, pal, w);
 }
 
+// Append nb (<= 6) bits to the line, MSB first, through a 32-bit word.
+#define PUSH(val, nb)                                         \
+  do {                                                        \
+    uint32_t v_ = (val);                                      \
+    int nb_ = (nb);                                           \
+    if (n + nb_ < 32) {                                       \
+      word = (word << nb_) | v_;                              \
+      n += nb_;                                               \
+    } else {                                                  \
+      int spill_ = n + nb_ - 32;                              \
+      w[nw++] = (word << (nb_ - spill_)) | (v_ >> spill_);    \
+      word = v_ & ((1u << spill_) - 1);                       \
+      n = spill_;                                             \
+    }                                                         \
+  } while (0)
+
 void IRAM_ATTR fast_picture_line(const uint8_t *rp, uint32_t *w) {
   memcpy(w, prefix, prefix_words * 4);
   // A random start for the sigma-delta on each line, new every field, turns the
   // fixed fine stripes into grain that changes 60 times a second.
   static uint32_t rng = 1;
   rng = rng * 1664525u + 1013904223u;
-  int nw = prefix_words, nbits = prefix_tail_bits, acc = line_dither ? rng >> 24 : prefix_acc;
-  uint64_t bits = prefix_tail;
-  for (int x = 0; x < VID_W; x++) {
-    int v = (x & 1) ? rp[x >> 1] & 15 : rp[x >> 1] >> 4;
-    int len = run_len[x];
-    uint32_t e = run_lut[v][acc][len - RUN_MIN];
-    bits = (bits << (2 * len)) | (e >> 8);
-    nbits += 2 * len;
+  int nw = prefix_words, n = prefix_tail_bits, acc = line_dither ? rng >> 24 : prefix_acc;
+  uint32_t word = prefix_tail;
+  for (int x = 0; x < VID_W; x += 2) {
+    uint32_t pair = rp[x >> 1];
+    uint32_t e = run_lut[run_key[x] | (pair >> 4) << 8 | acc];
+    PUSH(e >> 8, 2 * run_len[x]);
+    e = run_lut[run_key[x + 1] | (pair & 15) << 8 | (e & 255)];
+    PUSH(e >> 8, 2 * run_len[x + 1]);
     acc = e & 255;
-    if (nbits >= 32) {
-      nbits -= 32;
-      w[nw++] = bits >> nbits;
-    }
   }
   for (int s = pic_end_slot; s < SLOTS; s++) {  // front porch and right margin, at black
     acc += BLACK;
     int bit = acc >> 8;
     acc -= bit << 8;
-    bits = (bits << 2) | (bit << 1);
-    nbits += 2;
-    if (nbits >= 32) {
-      nbits -= 32;
-      w[nw++] = bits >> nbits;
-    }
+    PUSH(bit << 1, 2);
   }
 }
 
@@ -292,7 +307,7 @@ volatile uint32_t pic_busy_us, sound_busy_us;  // compute time, for the load rep
 void picture_task(void *) {
   static uint32_t buf[BATCH * LINE_WORDS];
   for (;;) {
-    const uint8_t *pic = showing >= 0 ? queue[showing].pic : NULL;  // latched per field
+    const uint8_t *pic = showing >= 0 ? queue[showing]->pic : NULL;  // latched per field
     for (int l = 0; l < LINES; l += BATCH) {
       int n = min(BATCH, LINES - l);
       uint32_t t0 = micros();
@@ -393,7 +408,7 @@ void sound_task(void *) {
       idx = 0;
       show(playing);
     }
-    uint8_t sample = playing >= 0 ? queue[playing].audio[idx] : 0xFF;  // 0xFF = mu-law zero
+    uint8_t sample = playing >= 0 ? queue[playing]->audio[idx] : 0xFF;  // 0xFF = mu-law zero
     uint32_t t0 = micros();
     if (sound_mode >= 2) {
       make_word_sound_block(word_dphase[(uint8_t)sample], 1 << (sound_mode - 2), buf, wphase, werr, wq);
@@ -412,7 +427,7 @@ void sound_task(void *) {
     sound_busy_us += micros() - t0;
     size_t w;
     i2s_channel_write(sound_tx, buf, sizeof(buf), &w, portMAX_DELAY);
-    if (playing >= 0 && ++idx >= queue[playing].n_audio) {
+    if (playing >= 0 && ++idx >= queue[playing]->n_audio) {
       next = (playing + 1) % NQ;
       playing = -1;  // picked up at the top of the loop as soon as it's full
     }
@@ -420,8 +435,9 @@ void sound_task(void *) {
 }
 
 void setup() {
-  Serial.setRxBufferSize(16384);
+  Serial.setRxBufferSize(1024);  // USB carries commands; Wi-Fi carries the stream
   Serial.begin(921600);
+  for (int i = 0; i < NQ; i++) queue[i] = (Packet *)malloc(sizeof(Packet));
   build_tables();
   self_test();
   pic_tx = start_i2s(I2S_NUM_0, 4);
@@ -434,6 +450,7 @@ void setup() {
   WiFi.setHostname("tubetv");
   WiFi.setSleep(false);  // power save adds tens of ms of latency and kills throughput
   WiFi.begin(WIFI_SSID, WIFI_PSK);
+  if (xTaskCreatePinnedToCore(network_task, "net", 8192, NULL, 5, NULL, 0) != pdPASS) Serial.println("#net task failed");
   Serial.println("#ready");
 }
 
@@ -441,10 +458,45 @@ WiFiServer server(5000);
 WiFiClient client;
 int fill = 0;
 
+// Compressed picture passes through here into the packet slot.
+const int ZBUF = 1024;  // compressed input is streamed through this
+static uint8_t zbuf[ZBUF];
+volatile uint32_t inflate_us;
+
+// Speed test (command T): read and discard for 3 s, then report KB/s and
+// signal strength on both links.
+template <typename Link> void throughput_test(Link &in) {
+  uint32_t start = millis(), bytes = 0;
+  while (millis() - start < 3000) {
+    int r = in.available() ? in.read(zbuf, sizeof(zbuf)) : 0;
+    if (r > 0) bytes += r;
+    else vTaskDelay(1);
+  }
+  char msg[80];
+  snprintf(msg, sizeof(msg), "#tput %u KB/s rssi %d dBm\n", bytes / 3 / 1024, WiFi.RSSI());
+  Serial.print(msg);
+  in.print(msg);
+}
+
+
+// Bulk read with a 1 s timeout. Stream::readBytes goes a byte at a time, which
+// held Wi-Fi to ~20 fps at 256x192.
+template <typename Link> bool read_full(Link &in, uint8_t *buf, size_t n) {
+  size_t got = 0;
+  uint32_t start = millis();
+  while (got < n && millis() - start < 1000) {
+    int r = in.available() ? in.read(buf + got, n - got) : 0;
+    if (r > 0) got += r;
+    else vTaskDelay(1);
+  }
+  return got == n;
+}
+
 // Read framed data from one link into free packet slots, in order. Returns
 // when the link has nothing more or the queue is full (for TCP, the unread
 // data then holds the sender back).
-void receive(Stream &in, int &matched) {
+template <typename Link> void receive(Link &in, int &matched) {
+  static bool compressed;
   while (in.available()) {
     if (matched != 4) {  // 1 = saw A5, 2 = A5 5A, 3 = "V", 4 = "V2", 5 = "C"
       int c = in.read();
@@ -454,21 +506,50 @@ void receive(Stream &in, int &matched) {
         if (c == 'N') sound_mode = 1;
         if (c >= 'W' && c <= 'Y') sound_mode = 2 + (c - 'W');
         if (c == 'D' || c == 'd') line_dither = c == 'D';
+        if (c == 'T') throughput_test(in);
         matched = 0;
       } else if (matched == 2 && c == 'C') matched = 5;
       else if (matched == 2 && c == 'V') matched = 3;
-      else if (matched == 3 && c == '2') matched = 4;
+      else if (matched == 3 && (c == '2' || c == '3')) matched = 4, compressed = c == '3';
       else if (matched == 0 && c == 0xA5) matched = 1;
       else if (matched == 1 && c == 0x5A) matched = 2;
       else matched = c == 0xA5 ? 1 : 0;
       continue;
     }
     if (full[fill]) return;
-    Packet &p = queue[fill];
-    uint16_t n = 0;
+    Packet &p = *queue[fill];
+    uint16_t n = 0, zlen = 0;
     matched = 0;
-    if (in.readBytes((uint8_t *)&n, 2) != 2 || n > AUD_MAX) continue;
-    if (in.readBytes(p.pic, VID_BYTES) != VID_BYTES || in.readBytes(p.audio, n) != n) continue;
+    if (!read_full(in, (uint8_t *)&n, 2) || n > AUD_MAX) continue;
+    if (compressed) {
+      if (!read_full(in, (uint8_t *)&zlen, 2)) continue;
+      // Inflate as it arrives, ZBUF bytes at a time (a whole-frame buffer
+      // left the Wi-Fi driver too little heap for its receive buffers).
+      static tinfl_decompressor inflator;  // ~11 KB; static, not on the task stack
+      tinfl_init(&inflator);
+      tinfl_status st = TINFL_STATUS_NEEDS_MORE_INPUT;
+      size_t produced = 0, left = zlen;
+      bool ok = true;
+      while (left > 0 && ok && st != TINFL_STATUS_DONE) {
+        size_t chunk = left < ZBUF ? left : ZBUF, off = 0;
+        if (!read_full(in, zbuf, chunk)) ok = false;
+        left -= chunk;
+        uint32_t t0 = micros();
+        while (ok && off < chunk) {
+          size_t in_len = chunk - off, out_len = VID_BYTES - produced;
+          st = tinfl_decompress(&inflator, zbuf + off, &in_len, p.pic, p.pic + produced, &out_len,
+                                TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF |
+                                    (left ? TINFL_FLAG_HAS_MORE_INPUT : 0));
+          off += in_len;
+          produced += out_len;
+          if (st < 0 || st == TINFL_STATUS_DONE || (in_len == 0 && out_len == 0)) break;
+        }
+        inflate_us += micros() - t0;
+        if (st < 0) ok = false;
+      }
+      if (!ok || st != TINFL_STATUS_DONE || produced != VID_BYTES) continue;
+    } else if (!read_full(in, p.pic, VID_BYTES)) continue;
+    if (!read_full(in, p.audio, n)) continue;
     p.n_audio = n;
     full[fill] = true;
     fill = (fill + 1) % NQ;
@@ -477,6 +558,33 @@ void receive(Stream &in, int &matched) {
 
 // Receive packets into free slots, in order. Every 5 s, report how busy the
 // two generators are.
+// Wi-Fi side, on core 0 next to the network stack: core 1 is mostly busy
+// building the picture, and receiving from there capped the stream at ~20 fps.
+void network_task(void *) {
+  bool serving = false;
+  int matched = 0;
+  for (;;) {
+    if (!serving && WiFi.status() == WL_CONNECTED) {
+      MDNS.begin("tubetv");
+      MDNS.addService("tubetv", "tcp", 5000);
+      server.begin();
+      server.setNoDelay(true);
+      serving = true;
+      Serial.printf("#wifi %s\n", WiFi.localIP().toString().c_str());
+    }
+    if (serving && server.hasClient()) {  // a new stream takes over
+      client = server.available();
+      client.setNoDelay(true);
+      stream_reset = true;
+      while (stream_reset) vTaskDelay(1);
+      fill = 0;
+      matched = 0;
+    }
+    if (client && client.connected()) receive(client, matched);
+    vTaskDelay(1);
+  }
+}
+
 void loop() {
   static uint32_t last = millis(), last_q = 0;
   if (millis() - last_q >= 200) {
@@ -485,30 +593,12 @@ void loop() {
   }
   if (millis() - last >= 5000) {
     uint32_t span = (millis() - last) * 10;  // percent of the span, in us/100
-    Serial.printf("#load picture %u%% sound %u%% heap %u wifi %s\n", pic_busy_us / span, sound_busy_us / span,
-                  ESP.getFreeHeap(), WiFi.localIP().toString().c_str());
-    pic_busy_us = sound_busy_us = 0;
+    Serial.printf("#load picture %u%% sound %u%% inflate %u%% heap %u wifi %s\n", pic_busy_us / span,
+                  sound_busy_us / span, inflate_us / span, ESP.getFreeHeap(), WiFi.localIP().toString().c_str());
+    pic_busy_us = sound_busy_us = inflate_us = 0;
     last = millis();
   }
-  static bool serving = false;
-  if (!serving && WiFi.status() == WL_CONNECTED) {
-    MDNS.begin("tubetv");
-    MDNS.addService("tubetv", "tcp", 5000);
-    server.begin();
-    server.setNoDelay(true);
-    serving = true;
-    Serial.printf("#wifi %s\n", WiFi.localIP().toString().c_str());
-  }
-  static int usb_matched = 0, tcp_matched = 0;
-  if (serving && server.hasClient()) {  // a new stream takes over
-    client = server.available();
-    client.setNoDelay(true);
-    stream_reset = true;
-    while (stream_reset) delay(1);
-    fill = 0;
-    tcp_matched = 0;
-  }
-  if (client && client.connected()) receive(client, tcp_matched);
+  static int usb_matched = 0;
   receive(Serial, usb_matched);
   delay(1);
 }

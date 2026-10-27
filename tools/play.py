@@ -4,23 +4,26 @@
     python3 tools/play.py test [start] [duration]   # moving test pattern + a little tune
 
 flags, anywhere:
-    --usb            stream over USB serial instead of Wi-Fi (caps at ~10 fps)
+    --usb            stream over USB serial instead of Wi-Fi (caps at ~3 fps)
     --host=NAME      board's address on Wi-Fi (default tubetv.local)
-    --fps=N          frame rate (default 30 on Wi-Fi, 10 on USB)
+    --fps=N          frame rate (default 24 on Wi-Fi, 3 on USB)
     --sound=w4|w2|w1|old|six   FM method, see rf-video.ino; w4 is the best on
                      the real set (clean sound, picture unharmed)
     --no-dither      static line pattern instead of per-field dither
 
-ffmpeg turns the clip into 128x96 4-bit grey and mono mu-law audio at
+ffmpeg turns the clip into 256x192 4-bit grey and mono mu-law audio at
 15625 Hz (one sample per TV line) with 75 us FM pre-emphasis. Each packet is
 one frame plus its share of the audio, so picture and sound stay in sync.
-Over Wi-Fi, TCP paces us: the board stops reading when its queue is full.
+Over Wi-Fi, frames go zlib-compressed (3-4x smaller; the board's TCP window
+caps raw throughput at ~430 KB/s), and TCP paces us: the board stops reading
+when its queue is full.
 Over USB, the board reports "#q N" (slots in use, of 4) and we send while N
 plus what we've sent since that report is under 4.
 """
-import re, socket, struct, subprocess, sys, time
+import re, socket, struct, subprocess, sys, time, zlib
 
-W, H, RATE, NQ = 128, 96, 15625, 4
+W, H, RATE, NQ = 256, 192, 15625, 3
+ZBUF = 24576  # send raw if compression doesn't help
 PORT = "/dev/cu.usbserial-0001"
 
 flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] if a.startswith("--")}
@@ -29,7 +32,7 @@ src = args[0]
 start = args[1] if len(args) > 1 else "0"
 dur = args[2] if len(args) > 2 else None
 usb = "--usb" in flags
-fps = int(flags.get("--fps") or (10 if usb else 30))
+fps = int(flags.get("--fps") or (3 if usb else 24))
 sound = flags.get("--sound") or "w4"
 
 if src == "test":
@@ -94,16 +97,24 @@ else:
     link.sendall(setup)
     send = link.sendall
 
+HI = bytes((v >> 4) << 4 for v in range(256))
+LO = bytes(v >> 4 for v in range(256))
 frame_no, t0 = 0, time.time()
 while True:
     pic = video.stdout.read(W * H)
     if len(pic) < W * H:
         break
-    # 4-bit grey, two pixels per byte, left pixel in the high nibble
-    packed = bytes((pic[i] >> 4) << 4 | pic[i + 1] >> 4 for i in range(0, W * H, 2))
+    # 4-bit grey, two pixels per byte, left pixel in the high nibble (done with
+    # C-speed bytes ops: a per-pixel Python loop can't keep up at 256x192)
+    hi, lo = pic[0::2].translate(HI), pic[1::2].translate(LO)
+    packed = (int.from_bytes(hi, "big") | int.from_bytes(lo, "big")).to_bytes(len(hi), "big")
     a0, a1 = frame_no * RATE // fps, (frame_no + 1) * RATE // fps
     snd = audio[a0:a1].ljust(a1 - a0, b"\xff")  # 0xFF = mu-law zero
-    send(bytes([0xA5, 0x5A, ord("V"), ord("2")]) + struct.pack("<H", len(snd)) + packed + snd)
+    z = zlib.compress(packed, 6) if not usb else b""
+    if z and len(z) <= ZBUF:
+        send(b"\xa5\x5aV3" + struct.pack("<HH", len(snd), len(z)) + z + snd)
+    else:
+        send(b"\xa5\x5aV2" + struct.pack("<H", len(snd)) + packed + snd)
     frame_no += 1
     if frame_no % (5 * fps) == 0:
         print(f"frame {frame_no}, {frame_no / (time.time() - t0):.1f} fps", flush=True)
