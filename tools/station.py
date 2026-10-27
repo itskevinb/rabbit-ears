@@ -9,7 +9,7 @@ Clips come from archive.org once, shrunk to 320 px, into the cache.
 
 The web page (tools/web/index.html, LAN only, no sign-in) shows what's on
 with a live thumbnail and has the remote: skip, play a show now, stand by,
-test pattern, sign off, mute; the lineup editor with an archive.org search; and
+test pattern, sign off, mute, volume; the lineup editor with an archive.org search; and
 the picture/sound settings. "Play next" queues shows ahead of the lineup. Lineup and settings live in the cache folder
 (CHANNEL4_CACHE, default ./cache), seeded from tools/lineup.json.
 
@@ -27,7 +27,28 @@ CACHE = Path(os.environ.get("CHANNEL4_CACHE", HERE.parent / "cache"))
 CACHE.mkdir(parents=True, exist_ok=True)
 flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] if a.startswith("--")}
 
-DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False}
+DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False,
+                    "volume": 100}
+
+
+def ulaw_decode(u):  # G.711, +/-32124
+    u = ~u & 0xFF
+    t = (((u & 0x0F) << 3) + 0x84) << ((u >> 4) & 7)
+    return 0x84 - t if u & 0x80 else t - 0x84
+
+
+def ulaw_encode(x):
+    sign = 0x80 if x < 0 else 0
+    x = min(abs(x), 32635) + 0x84
+    exp = min(7, x.bit_length() - 8)
+    return ~(sign | exp << 4 | (x >> (exp + 3)) & 0x0F) & 0xFF
+
+
+def volume_table(volume):
+    """A bytes.translate table that scales mu-law audio; 0-100 on a squared
+    curve, so the slider feels even."""
+    gain = (max(0, min(100, volume)) / 100) ** 2
+    return bytes(ulaw_encode(round(ulaw_decode(u) * gain)) for u in range(256))
 
 
 def load(name, default):
@@ -132,6 +153,7 @@ class Station:
         self.lock = threading.Lock()
         self.lineup = load("lineup.json", None) or json.loads((HERE / "lineup.json").read_text())
         self.settings = {**DEFAULT_SETTINGS, **load("settings.json", {})}
+        self.volume_lut = volume_table(self.settings["volume"])
         self.tv = TV(flags.get("--host") or "tubetv.local", self.setup())
         self.mode = "lineup"            # lineup | standby | testcard | off
         self.now = self.upcoming = None  # shows
@@ -143,6 +165,8 @@ class Station:
         self.pos = self.length = 0.0     # seconds into / length of the current show
         self.fetching = set()
         self.durations = load("durations.json", {})
+        self.resume = load("now.json", None)  # {"show", "pos"}: a restart picks the show up where it was
+        self.bulk = None                      # progress of a "download all"
         self.bags = {}                   # block -> shuffled shows not played yet
         self.changed = threading.Event()
 
@@ -237,6 +261,8 @@ class Station:
             self.tv.send(self.tv.setup)
         if self.settings["muted"]:  # silence, not no carrier: the set stays quiet instead of buzzing
             mulaw = bytes([SILENCE]) * len(mulaw)
+        elif self.settings["volume"] < 100:
+            mulaw = mulaw.translate(self.volume_lut)
         self.tv.send(packet(gray, mulaw))
         self.frame = gray
 
@@ -248,9 +274,8 @@ class Station:
             self.send(gray, bytes([SILENCE]) * audio_share(n, fps))
             n += 1
 
-    def play(self, show, path):
+    def play(self, show, path, start=0.0):
         self.length = self.duration(show)
-        start = 0.0
         while True:
             fps, s = self.settings["fps"], self.settings
             source = Source.file(path, start, fps=fps, brightness=s["brightness"], contrast=s["contrast"])
@@ -260,6 +285,8 @@ class Station:
                     self.send(gray, mulaw)
                     n += 1
                     self.pos = start + n / fps
+                    if n % (5 * fps) == 0:
+                        save("now.json", {"show": show, "pos": self.pos})
                     if self.reopen:  # picture settings changed: pick up where we are
                         break
                     if self.interrupted():
@@ -296,6 +323,9 @@ class Station:
                     if self.override is not None:
                         current, self.override = self.override, None
                     self.skip = False
+                start_at = 0.0
+                if current is None and self.resume and self.mode == "lineup":
+                    current, start_at, self.resume = self.resume["show"], float(self.resume["pos"]), None
                 if current is None:
                     with self.lock:
                         if self.queue:
@@ -305,7 +335,7 @@ class Station:
                 if current is None:
                     self.hold(channel_card(("NO SHOWS IN THE LINEUP", 14, 230)), seconds=5)
                     continue
-                self.now, self.pos, self.length = current, 0.0, self.duration(current)
+                self.now, self.pos, self.length = current, start_at, self.duration(current)
                 self.upcoming = self.queue[0] if self.queue else self.pick(avoid=current)
                 if self.upcoming:
                     threading.Thread(target=self.fetch, args=(self.upcoming,), daemon=True).start()
@@ -322,12 +352,15 @@ class Station:
                 if path is None:  # couldn't get it: move on rather than hang
                     current = None
                     continue
-                print(f"{datetime.now():%H:%M} now: {current['title']}", flush=True)
-                self.hold(channel_card(("UP NEXT", 14, 170), (f"{current['title']} ({current.get('year', '')})", 16, 230)),
-                          seconds=5, until=self.interrupted)
-                if self.interrupted():
-                    raise Interrupted
-                self.play(current, path)
+                print(f"{datetime.now():%H:%M} now: {current['title']}" + (f" from {start_at:.0f} s" if start_at else ""),
+                      flush=True)
+                if not start_at:
+                    self.hold(channel_card(("UP NEXT", 14, 170), (f"{current['title']} ({current.get('year', '')})", 16, 230)),
+                              seconds=5, until=self.interrupted)
+                    if self.interrupted():
+                        raise Interrupted
+                self.play(current, path, start_at)
+                save("now.json", None)
                 current = None if self.queue else self.upcoming  # the queue goes first
             except Interrupted:
                 # Skip goes to the show the page says is up next; "play now" and
@@ -347,7 +380,7 @@ class Station:
         return {"mode": self.mode, "block": self.block(), "now": show(self.now), "upcoming": show(upcoming),
                 "queue": [show(q) for q in self.queue],
                 "pos": round(self.pos), "length": round(self.length), "settings": self.settings,
-                "lineup": {**self.lineup, **lineup}, "fetching": sorted(self.fetching),
+                "lineup": {**self.lineup, **lineup}, "fetching": sorted(self.fetching), "bulk": self.bulk,
                 "clock": datetime.now().strftime("%H:%M")}
 
     def find(self, key):
@@ -415,6 +448,34 @@ class Station:
         with self.lock:
             self.queue = []
             save("queue.json", self.queue)
+
+    def download(self, scope):
+        """Fetch every show not yet cached: the queue, or ("all") the queue and the whole lineup."""
+        if self.bulk and self.bulk["running"]:
+            return
+        shows = list(self.queue) + ([] if scope == "queue" else self.lineup["day"] + self.lineup["night"])
+        todo, seen = [], set()
+        for show in shows:
+            if slug(show) not in seen and not self.path(show).exists():
+                seen.add(slug(show))
+                todo.append(show)
+        self.bulk = {"scope": scope, "total": len(todo), "done": 0, "failed": [], "running": True, "current": None}
+
+        def work():
+            for show in todo:  # one at a time, so playback keeps its CPU
+                self.bulk["current"] = show["title"]
+                if self.fetch(show) is None:
+                    self.bulk["failed"].append(show["title"])
+                self.bulk["done"] += 1
+            self.bulk["running"], self.bulk["current"] = False, None
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def set_volume(self, volume):
+        volume = max(0, min(100, int(volume)))
+        self.volume_lut = volume_table(volume)
+        self.settings = {**self.settings, "volume": volume}
+        save("settings.json", self.settings)
 
     def set_muted(self, muted):
         self.settings = {**self.settings, "muted": bool(muted)}
@@ -491,6 +552,10 @@ class Remote(BaseHTTPRequestHandler):
                 station.queue_remove(int(b.get("index", -1)))
             elif path == "/api/queue/clear":
                 station.queue_clear()
+            elif path == "/api/download":
+                station.download("queue" if b.get("scope") == "queue" else "all")
+            elif path == "/api/volume":
+                station.set_volume(b.get("volume", 100))
             elif path == "/api/mute":
                 station.set_muted(b.get("muted", not station.settings["muted"]))
             elif path == "/api/uncache":

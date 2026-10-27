@@ -89,13 +89,18 @@
       <button onclick="mode('testcard')">Test pattern</button>
       <button onclick="mode('off')">Sign off</button>
     </div>
+    <label for="volume">Volume: <b id="volumeV"></b>%</label>
+    <input type="range" id="volume" min="0" max="100" step="5">
     <p class="note">The test pattern is for tuning: turn the fine tuning until the wedges at the bottom are sharpest.</p>
   </section>
 
   <section id="queueBox" style="display:none">
     <h2>Playing next</h2>
     <ul id="queue"></ul>
-    <div class="buttons" style="margin-top:10px"><button onclick="post('/api/queue/clear').then(s => s && toast('Queue cleared'))">Clear the queue</button></div>
+    <div class="buttons" style="margin-top:10px">
+      <button onclick="download('queue')">Download these now</button>
+      <button onclick="post('/api/queue/clear').then(s => s && toast('Queue cleared'))">Clear the queue</button></div>
+    <p class="note bulk"></p>
   </section>
 
   <section>
@@ -109,7 +114,9 @@
       <div><label for="nightStarts">Late night starts</label><select id="nightStarts"></select></div>
       <div><label for="nightEnds">Late night ends</label><select id="nightEnds"></select></div>
     </div>
-    <p class="note">Shows download from archive.org the first time they're picked.</p>
+    <div class="buttons" style="margin-top:12px"><button onclick="download('all')">Download the whole lineup</button></div>
+    <p class="note">Shows download from archive.org the first time they're picked, or all at once with the button.</p>
+    <p class="note bulk"></p>
   </section>
 
   <section>
@@ -190,7 +197,9 @@ function render() {
   }
   $('upNext').textContent = s.mode === 'lineup' && s.upcoming ? 'Up next: ' + s.upcoming.title : '';
   $('mute').textContent = s.settings.muted ? '🔇 Muted · unmute' : '🔊 Mute';
+  if (document.activeElement !== $('volume')) { $('volume').value = s.settings.volume; $('volumeV').textContent = s.settings.volume; }
   $('mute').classList.toggle('primary', !!s.settings.muted);
+  for (const el of document.querySelectorAll('.bulk')) el.textContent = bulkText(s.bulk);
   renderQueue();
   renderLineup();
   if (!settingsDirty) loadSettings();
@@ -234,6 +243,13 @@ function saveLineup(patch, msg) {
   return post('/api/lineup', l).then(s => s && msg && toast(msg));
 }
 function playNow(slug) { post('/api/play', {slug}).then(s => s && toast('Switching…')); }
+function download(scope) { post('/api/download', {scope}).then(s => s && toast(s.bulk && s.bulk.total ? 'Downloading…' : 'Already downloaded')); }
+function bulkText(b) {
+  if (!b) return '';
+  if (b.running) return `Downloading ${b.done + 1} of ${b.total}: ${b.current || ''}`;
+  if (!b.total) return 'Everything is downloaded.';
+  return `Downloaded ${b.total - b.failed.length} of ${b.total}` + (b.failed.length ? `; couldn't get ${b.failed.join(', ')}` : '.');
+}
 function playNext(slug) { post('/api/queue', {slug}).then(s => s && toast('Queued')); }
 function renderQueue() {
   const q = state.queue || [];
@@ -277,6 +293,12 @@ function addShow() {
   saveLineup(l => l[block].push(show), 'Added. It downloads the first time it plays.').then(() => { tab = block; hidePicker(); renderLineup(); });
 }
 
+let volumeTimer;
+$('volume').oninput = () => {  // live while dragging, at most ~4 updates a second
+  $('volumeV').textContent = $('volume').value;
+  clearTimeout(volumeTimer);
+  volumeTimer = setTimeout(() => post('/api/volume', {volume: +$('volume').value}), 250);
+};
 const sliders = ['fps', 'brightness', 'contrast'];
 function loadSettings() {
   const s = state.settings;
