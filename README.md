@@ -1,5 +1,7 @@
 # rabbit-ears
 
+<p align="center"><img src="docs/that-s-all-folks.jpg" width="480" alt="A Panoramic 12-inch black-and-white tube TV showing the 'That's all Folks!' end card, sent from an ESP32 with no parts"></p>
+
 An ESP32 that runs its own little TV station for a vintage black-and-white tube set, with **no extra parts**. Two short wires on two GPIO pins, held near the set's antenna screws, carry a watchable picture and FM sound on VHF channel 4. A Python station streams public-domain cartoons and creature features to it over Wi-Fi around the clock, and you run it from your phone with a web remote.
 
 - 256×192 picture, 16 greys, 24 fps
