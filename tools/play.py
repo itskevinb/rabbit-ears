@@ -27,7 +27,10 @@ else:
     ain = ["-ss", start, "-i", src]
 limit = ["-t", dur] if dur else []
 
+# normalize stretches each scene to the full grey range (old films are often
+# tinted, which comes out murky in grey), smoothed over ~3 s so it doesn't pump.
 vf = (f"fps={FPS},scale={W}:{H}:force_original_aspect_ratio=decrease,"
+      f"normalize=smoothing=30:independence=0,"
       f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,format=gray")
 video = subprocess.Popen(["ffmpeg", "-loglevel", "error", *vin, *limit, "-vf", vf, "-an",
                           "-f", "rawvideo", "-"], stdout=subprocess.PIPE)
