@@ -5,6 +5,8 @@
 
 flags, anywhere:
     --usb            stream over USB serial instead of Wi-Fi (~3 fps at 256x192)
+    --serial=DEV     USB serial device (default /dev/cu.usbserial-0001, the Mac's
+                     name for a CP2102; /dev/ttyUSB0 on Linux, COM3 on Windows)
     --host=NAME      board's address on Wi-Fi (default tubetv.local)
     --fps=N          frame rate (default 24 on Wi-Fi, 3 on USB)
     --sound=w4|w2|w1|old|six   FM method, see rf-video.ino; w4 is the best on
@@ -42,7 +44,7 @@ else:
 
 if usb:
     import serial
-    link = serial.Serial(PORT, 921600, timeout=0.05)
+    link = serial.Serial(flags.get("--serial") or PORT, 921600, timeout=0.05)
     time.sleep(2)  # opening the port may reset the board; let that boot finish
     link.reset_input_buffer()
     link.write(b"\xa5\x5aCH")  # restart clean

@@ -1,6 +1,9 @@
 """Channel 4: the tube TV's station, with its own web remote.
 
-    python3 tools/station.py [--host=tubetv.local] [--port=80]
+    python3 tools/station.py [--host=tubetv.local] [--port=8080]
+
+The port defaults to 80, which needs root or CAP_NET_BIND_SERVICE (the systemd
+unit in deploy/ grants it). The night block follows the box's own time zone.
 
 Plays the lineup nonstop to the ESP32 transmitter over one long-lived
 connection: the "day" list shuffled, the "night" list (creature features)
@@ -75,7 +78,10 @@ def font(size):
                         ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 0)):
         if os.path.exists(path):
             return ImageFont.truetype(path, size, index=index)
-    return ImageFont.load_default(size)
+    try:
+        return ImageFont.load_default(size)
+    except TypeError:  # Pillow < 10.1 has only the small bitmap font
+        return ImageFont.load_default()
 
 
 # ---- cards, drawn straight to a 256x192 grey frame ---------------------------
@@ -511,6 +517,14 @@ class Remote(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def cross_site(self):
+        """There's no sign-in, so refuse what another web page could send: a
+        foreign Origin, or a body that isn't JSON (text/plain skips the CORS preflight)."""
+        origin = self.headers.get("Origin")
+        if origin and urllib.parse.urlparse(origin).netloc != self.headers.get("Host"):
+            return True
+        return self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json"
+
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(url.query))
@@ -534,6 +548,8 @@ class Remote(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
+        if self.cross_site():
+            return self.reply(403, {"error": "cross-site request refused"})
         try:
             b = self.body()
             if path == "/api/skip":
@@ -569,7 +585,8 @@ class Remote(BaseHTTPRequestHandler):
             self.reply(400, {"error": str(e)})
 
 
-threading.Thread(target=station.run, daemon=True).start()
 port = int(flags.get("--port") or 80)
+server = ThreadingHTTPServer(("0.0.0.0", port), Remote)  # bind first: a refused port stops us before we touch the TV
+threading.Thread(target=station.run, daemon=True).start()
 print(f"remote on http://0.0.0.0:{port}/", flush=True)
-ThreadingHTTPServer(("0.0.0.0", port), Remote).serve_forever()
+server.serve_forever()

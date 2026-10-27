@@ -55,7 +55,7 @@ The big comment at the top of [`rf-video/rf-video.ino`](rf-video/rf-video.ino) h
 
 Start with the zero-effort tests, in this order:
 
-1. **[`rf-test/`](rf-test/rf-test.ino)** flashes the carrier on and off. Tune to channel 4 and you should see the screen pulse with bars. This proves the RF path.
+1. **[`rf-test/`](rf-test/rf-test.ino)** switches a bare carrier on and off 120 times a second. Tune to channel 4 and you should see two wide black bands with snow between them, drifting slowly (there's no sync yet to hold them still). That proves the RF path.
 2. **[`rf-tv/`](rf-tv/rf-tv.ino)** shows a still test card with a silent sound carrier, so the buzz goes quiet. Use it to set the fine tuning, then the antenna wires' position, for the cleanest picture. `python3 tools/make_image.py photo.jpg` swaps in your own picture.
 3. **[`rf-video/`](rf-video/rf-video.ino)** is the real station firmware.
 
@@ -75,17 +75,17 @@ python3 tools/play.py some-film.mp4 60 30      # start at 60 s, play 30 s
 python3 tools/play.py test                     # moving test pattern + a tune
 ```
 
-The flags are `--host=`, `--fps=`, `--sound=`, `--cleanup=strong|light|off`, `--no-dither` and `--usb`. USB only manages about 3 fps at this resolution, so it's mostly for testing.
+The flags are `--host=`, `--fps=`, `--sound=`, `--cleanup=strong|light|off`, `--no-dither` and `--usb` (with `--serial=/dev/ttyUSB0` or `COM3` off the Mac). USB only manages about 3 fps at this resolution, so it's mostly for testing.
 
 ## Channel 4: the station
 
 ```sh
-python3 tools/station.py --port=8080           # then open http://localhost:8080
+python3 tools/station.py --port=8080           # then open http://localhost:8080 (port 80, the default, needs root)
 ```
 
 [`tools/station.py`](tools/station.py) plays the lineup nonstop:
 
-- The **day** block is shuffled, and the **night** block runs from 21:00 to 06:00. The lineup is seeded from [`tools/lineup.json`](tools/lineup.json).
+- The **day** block is shuffled, and the **night** block runs from 21:00 to 06:00 in the box's own time zone (containers often default to UTC, so set it). The lineup is seeded from [`tools/lineup.json`](tools/lineup.json).
 - Each show is fetched once from archive.org, shrunk to 320 px, and kept in `cache/`.
 - An "up next" card plays before each show.
 - If the station restarts, it picks up where it left off.
@@ -97,13 +97,15 @@ The web page ([`tools/web/index.html`](tools/web/index.html)) is built for a pho
 - **Lineup:** a play-next queue and an editor with archive.org search.
 - **Settings:** picture and sound, including **sound cleanup**. That's click removal and denoising before the compressor, which brings the hiss in the pauses down about 27 dB without touching dialogue.
 
-There is **no sign-in**. Keep it on your LAN.
+There is **no sign-in**, so keep it on your LAN. The station refuses commands sent by other web pages (a foreign `Origin`, or a body that isn't JSON), but anyone on your network can use the remote.
 
 To run the station around the clock on a small Linux box or container, use [`deploy/`](deploy/). It's a systemd unit with a dynamic user and state in `/var/lib/channel4`:
 
 ```sh
-sh deploy/push.sh root@your-box     # needs python3, python3-pil, ffmpeg, avahi + libnss-mdns
+sh deploy/push.sh root@your-box
 ```
+
+The box needs `python3`, `python3-pil`, `ffmpeg`, `fonts-dejavu-core`, `avahi-daemon` and `libnss-mdns`, plus its time zone set (`timedatectl set-timezone America/Toronto`). The script deploys the committed `tools/` as of `HEAD`, as root.
 
 The shows in the default lineup are films generally treated as public domain in the US: classic Fleischer Superman and Popeye, early Bugs Bunny, Three Stooges shorts, *Steamboat Willie*, *Nosferatu*, *Night of the Living Dead* and *Carnival of Souls*. The repo only holds their archive.org identifiers. Check the status where you live before rebroadcasting anything. Some of the cartoons are of their time.
 
