@@ -65,6 +65,19 @@ int16_t row_of_line[LINES];  // picture row for a line, -1 outside
 uint32_t blank_line[LINE_WORDS], vsync_line[LINE_WORDS];
 uint32_t sound_step[256];    // pulse spacing per audio sample value
 
+// Fast path for picture lines (the slot-by-slot pass took ~92% of a core and
+// sometimes missed the deadline, which drops the carrier and breaks sync).
+// Each pixel covers a run of 5 or 6 slots at one level, and the sigma-delta
+// state is just acc (0..255), so a table gives the bits a pixel makes and the
+// acc it leaves: 128 lookups per line instead of ~860 slot steps. The part of
+// the line before the first pixel always starts from acc = 0, so it's
+// prebuilt too.
+const int RUN_MIN = 5, RUN_MAX = 6;
+uint32_t run_lut[16][256][RUN_MAX - RUN_MIN + 1];  // bits << 8 | new acc
+uint8_t run_len[VID_W];
+int pic_end_slot, prefix_words, prefix_tail_bits, prefix_acc;
+uint32_t prefix[LINE_WORDS], prefix_tail;
+
 i2s_chan_handle_t start_i2s(i2s_port_t port, int pin) {
   i2s_chan_handle_t h;
   i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(port, I2S_ROLE_MASTER);
@@ -115,6 +128,40 @@ void build_tables() {
     float v = ((float)(l - FIRST_ACTIVE) / (LAST_ACTIVE + 1 - FIRST_ACTIVE) - 0.5f) / SAFE + 0.5f;
     row_of_line[l] = (l >= FIRST_ACTIVE && l <= LAST_ACTIVE && v >= 0 && v < 1) ? (int)(v * VID_H) : -1;
   }
+  int first = 0;
+  while (slot_src[first] >= VID_W) first++;
+  pic_end_slot = first;
+  for (int x = 0; x < VID_W; x++) {
+    run_len[x] = 0;
+    while (pic_end_slot < SLOTS && slot_src[pic_end_slot] == x) run_len[x]++, pic_end_slot++;
+    if (run_len[x] < RUN_MIN || run_len[x] > RUN_MAX) Serial.printf("#bad run %d at pixel %d\n", run_len[x], x);
+  }
+  int acc = 0;
+  uint32_t word = 0;
+  for (int s = 0; s < first; s++) {
+    acc += pal[slot_src[s]];
+    int bit = acc >> 8;
+    acc -= bit << 8;
+    word = (word << 2) | (bit << 1);
+    if ((s & 15) == 15) prefix[s >> 4] = word;
+  }
+  prefix_words = first / 16;
+  prefix_tail_bits = (first % 16) * 2;
+  prefix_tail = word & ((1ull << prefix_tail_bits) - 1);
+  prefix_acc = acc;
+  for (int v = 0; v < 16; v++)
+    for (int a0 = 0; a0 < 256; a0++)
+      for (int len = RUN_MIN; len <= RUN_MAX; len++) {
+        int a = a0;
+        uint32_t bits = 0;
+        for (int i = 0; i < len; i++) {
+          a += BLACK - v * (BLACK - WHITE) / 15;
+          int bit = a >> 8;
+          a -= bit << 8;
+          bits = (bits << 2) | (bit << 1);
+        }
+        run_lut[v][a0][len - RUN_MIN] = bits << 8 | a;
+      }
   // 72 MHz = 8 x pulse rate, so a deviation d moves the pulse rate by d/8.
   for (int i = 0; i < 256; i++) {
     float dev = (int8_t)i / 128.0f * 25000.0f;
@@ -122,21 +169,66 @@ void build_tables() {
   }
 }
 
+// The reference: one sigma-delta step per slot. Used by the self-test.
+void slow_picture_line(const uint8_t *rp, uint32_t *w) {
+  int pal[VID_W + 2];
+  for (int x = 0; x < VID_W; x += 2) {
+    pal[x] = BLACK - (rp[x >> 1] >> 4) * (BLACK - WHITE) / 15;
+    pal[x + 1] = BLACK - (rp[x >> 1] & 15) * (BLACK - WHITE) / 15;
+  }
+  pal[PAL_SYNC] = SYNC;
+  pal[PAL_BLACK] = BLACK;
+  sigma_delta(slot_src, pal, w);
+}
+
+void IRAM_ATTR fast_picture_line(const uint8_t *rp, uint32_t *w) {
+  memcpy(w, prefix, prefix_words * 4);
+  int nw = prefix_words, nbits = prefix_tail_bits, acc = prefix_acc;
+  uint64_t bits = prefix_tail;
+  for (int x = 0; x < VID_W; x++) {
+    int v = (x & 1) ? rp[x >> 1] & 15 : rp[x >> 1] >> 4;
+    int len = run_len[x];
+    uint32_t e = run_lut[v][acc][len - RUN_MIN];
+    bits = (bits << (2 * len)) | (e >> 8);
+    nbits += 2 * len;
+    acc = e & 255;
+    if (nbits >= 32) {
+      nbits -= 32;
+      w[nw++] = bits >> nbits;
+    }
+  }
+  for (int s = pic_end_slot; s < SLOTS; s++) {  // front porch and right margin, at black
+    acc += BLACK;
+    int bit = acc >> 8;
+    acc -= bit << 8;
+    bits = (bits << 2) | (bit << 1);
+    nbits += 2;
+    if (nbits >= 32) {
+      nbits -= 32;
+      w[nw++] = bits >> nbits;
+    }
+  }
+}
+
 void make_line(int line, const uint8_t *pic, uint32_t *w) {
   int row = row_of_line[line];
   if (line < VSYNC_LINES) memcpy(w, vsync_line, sizeof(vsync_line));
   else if (row < 0 || !pic) memcpy(w, blank_line, sizeof(blank_line));
-  else {
-    static int pal[VID_W + 2];
-    const uint8_t *rp = pic + row * (VID_W / 2);
-    for (int x = 0; x < VID_W; x += 2) {
-      pal[x] = BLACK - (rp[x >> 1] >> 4) * (BLACK - WHITE) / 15;
-      pal[x + 1] = BLACK - (rp[x >> 1] & 15) * (BLACK - WHITE) / 15;
-    }
-    pal[PAL_SYNC] = SYNC;
-    pal[PAL_BLACK] = BLACK;
-    sigma_delta(slot_src, pal, w);
+  else fast_picture_line(pic + row * (VID_W / 2), w);
+}
+
+// Check the fast path against the reference on random rows.
+void self_test() {
+  uint8_t row[VID_W / 2];
+  uint32_t a[LINE_WORDS], b[LINE_WORDS];
+  int bad = 0;
+  for (int t = 0; t < 50; t++) {
+    for (int i = 0; i < VID_W / 2; i++) row[i] = esp_random();
+    slow_picture_line(row, a);
+    fast_picture_line(row, b);
+    bad += memcmp(a, b, sizeof(a)) != 0;
   }
+  Serial.printf("#selftest %s (%d of 50 rows differ)\n", bad ? "fail" : "ok", bad);
 }
 
 volatile uint32_t pic_busy_us, sound_busy_us;  // compute time, for the load report in loop()
@@ -206,6 +298,7 @@ void setup() {
   Serial.setRxBufferSize(32768);
   Serial.begin(921600);
   build_tables();
+  self_test();
   pic_tx = start_i2s(I2S_NUM_0, 4);
   sound_tx = start_i2s(I2S_NUM_1, 5);
   xTaskCreatePinnedToCore(picture_task, "pic", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 0);
