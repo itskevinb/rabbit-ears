@@ -1,15 +1,14 @@
 // ESP32 (classic) analog TV transmitter, VHF channel 4, no extra parts.
 //
-// I2S0 streams a 1-bit pattern out of D4 (GPIO4) at R = 40 Mbit/s. A pulse
-// on every third bit is an R/3 = 13.33 MHz pulse train; its image at
-// 2R - R/3 = 66.67 MHz lands in channel 4 (picture carrier 67.25 MHz, within
-// reach of the fine tuning). Leaving
+// I2S0 streams a 1-bit pattern out of D4 (GPIO4) at R = 27 Mbit/s (APLL). A
+// pulse on every other bit is an R/2 = 13.5 MHz pulse train; its 5th harmonic,
+// 67.5 MHz, lands on channel 4's picture carrier (67.25 MHz). Leaving
 // pulses out (first-order sigma-delta) sets the carrier strength, and that is
 // the picture: NTSC is negative modulation, so full carrier = sync, 75% =
 // black, 12.5% = white.
 //
-// Timing is NTSC-like, monochrome, non-interlaced: 262 lines of 2528 bits
-// (79 words, so every line is whole 32-bit words) = 63.2 us, ~60.4 Hz.
+// Timing is NTSC-like, monochrome, non-interlaced: 262 lines of 1728 bits
+// (54 words, so every line is whole 32-bit words) = 64.0 us, ~59.6 Hz.
 // Frames are built once into RAM and streamed forever. Each copy uses a
 // different random dither in the pulse dropping, which turns the fixed stripe
 // patterns plain sigma-delta makes into fine grain; alternating copies lets the
@@ -19,13 +18,13 @@
 // Sound: the set's audio comes from the 4.5 MHz beat between the picture and
 // sound carriers; with no sound carrier it buzzes with the picture. I2S1 sends
 // a second R stream out of D5 (GPIO5) carrying an unmodulated FM carrier,
-// i.e. silence: the 9-bit pattern 100010001 repeated. Its image at
-// 2R - 2R/9 = 71.11 MHz is R/9 = 4.44 MHz above the picture carrier, a bit
-// under the nominal 4.5 but inside the sound IF. (R = 40.5 MHz would make it
-// exact, but the APLL can't supply the 81 MHz MCLK that needs.) Every spectral
-// line of a 9-bit pattern is a multiple of R/9 and this one has none at R/3,
-// so it can't beat into the picture. (A first try with an uneven pulse spacing that repeated every
-// line put spurs next to the picture carrier: wide vertical stripes.)
+// i.e. silence: the 3-bit pattern 100 repeated, a 9 MHz pulse train whose
+// 8th harmonic is 72.0 MHz, exactly 4.5 MHz above the picture. That's why R
+// is 27 MHz: R/2 and R/3 trains share harmonics every 4.5 MHz. Its lines are
+// all multiples of 9 MHz, none at 67.5, so it can't beat into the picture.
+// History: at R = 40 MHz the best clean pattern sat 4.44 MHz up (56 kHz off,
+// incomplete quieting); an uneven per-line pattern gave wide vertical
+// stripes; R = 40.5 MHz needs an 81 MHz MCLK the APLL can't make.
 // Serial "s0" turns it off, "s1" back on.
 //
 // Hold a short wire on D4 NEAR the antenna screws, never touching them: the
@@ -37,11 +36,11 @@
 
 const int DOUT_PIN = 4, SOUND_PIN = 5;
 
-const uint32_t BIT_RATE = 40000000;
+const uint32_t BIT_RATE = 27000000;
 const float BITS_PER_US = BIT_RATE / 1e6f;
-const int LINE_WORDS = 79;
-const int LINE_BITS = LINE_WORDS * 32;  // 2528 bits = 63.2 us
-const int SOUND_WORDS = 9 * 100;        // whole 9-bit cycles
+const int LINE_WORDS = 54;
+const int LINE_BITS = LINE_WORDS * 32;  // 1728 bits = 64.0 us
+const int SOUND_WORDS = 3 * 300;        // whole 3-bit cycles
 const int LINES = 262;
 const int VSYNC_LINES = 3;
 const int FIRST_ACTIVE = 20, LAST_ACTIVE = 259;
@@ -88,7 +87,7 @@ void build_frame(uint32_t *frame) {
     uint32_t *words = frame + line * LINE_WORDS;
     memset(words, 0, LINE_WORDS * 4);
     float acc = 0;
-    for (int bit = 0; bit + 2 < LINE_BITS; bit += 3) {
+    for (int bit = 0; bit + 1 < LINE_BITS; bit += 2) {
       float a = level(line, bit);
       bool picture = line >= FIRST_ACTIVE && line <= LAST_ACTIVE && a < BLACK;
       acc += picture ? a + dither * noise() : a;  // keep sync and blanking exact
@@ -103,10 +102,11 @@ void build_frame(uint32_t *frame) {
 void build_sound() {
   memset(sound, 0, sizeof(sound));
   for (int bit = 0; sound_on && bit < SOUND_WORDS * 32; bit++)
-    if (bit % 9 % 4 == 0) sound[bit / 32] |= 0x80000000u >> (bit % 32);  // 100010001
+    if (bit % 3 == 0) sound[bit / 32] |= 0x80000000u >> (bit % 32);  // 100
 }
 
-// Stereo x 32-bit slots: BCLK = 64 x sample rate = 40 MHz, MCLK = 128 x = 80 MHz = PLL 160 / 2.
+// Stereo x 32-bit slots: BCLK = 64 x sample rate = 27 MHz, MCLK = 128 x = 54 MHz from the
+// APLL (both channels ask for the same rate, so they can share it).
 i2s_chan_handle_t start_i2s(i2s_port_t port, int pin) {
   i2s_chan_handle_t h;
   i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(port, I2S_ROLE_MASTER);
@@ -119,7 +119,7 @@ i2s_chan_handle_t start_i2s(i2s_port_t port, int pin) {
     .gpio_cfg = {.mclk = I2S_GPIO_UNUSED, .bclk = I2S_GPIO_UNUSED, .ws = I2S_GPIO_UNUSED,
                  .dout = (gpio_num_t)pin, .din = I2S_GPIO_UNUSED, .invert_flags = {}},
   };
-  sc.clk_cfg.clk_src = I2S_CLK_SRC_PLL_160M;
+  sc.clk_cfg.clk_src = I2S_CLK_SRC_APLL;
   sc.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_128;
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(h, &sc));
   gpio_set_drive_capability((gpio_num_t)pin, GPIO_DRIVE_CAP_3);
