@@ -170,6 +170,7 @@ class Station:
         self.frame = channel_card()      # last grey frame sent, for the thumbnail
         self.pos = self.length = 0.0     # seconds into / length of the current show
         self.fetching = set()
+        self.encoder = threading.Lock()  # one download at a time: shrinking is CPU-bound, and playback needs a core
         self.durations = load("durations.json", {})
         self.resume = load("now.json", None)  # {"show", "pos"}: a restart picks the show up where it was
         self.bulk = None                      # progress of a "download all"
@@ -223,27 +224,32 @@ class Station:
                 time.sleep(1)
             return out if out.exists() else None
         try:
-            url = f"https://archive.org/download/{urllib.parse.quote(show['item'])}/{urllib.parse.quote(show['file'])}"
-            tmp = out.with_suffix(".part.mp4")
-            for attempt, wait in enumerate((0, 5, 20)):  # archive.org throws the odd 5XX
-                time.sleep(wait)
-                print(f"fetching {show['title']}" + (f" (try {attempt + 1})" if attempt else ""), flush=True)
-                r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
-                                    "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
-                                    "-i", url, "-vf", "scale=320:-2", "-ac", "1", "-c:v", "libx264", "-preset", "veryfast",
-                                    "-crf", "26", "-c:a", "aac", str(tmp)])
-                if r.returncode == 0:
-                    break
-                tmp.unlink(missing_ok=True)
-            else:
-                print(f"fetch failed: {show['title']}", flush=True)
-                return None
-            tmp.rename(out)
-            self.duration(show)
-            return out
+            with self.encoder:
+                return self._fetch(show, out)
         finally:
             with self.lock:
                 self.fetching.discard(key)
+
+    def _fetch(self, show, out):
+        """Download and shrink, at the lowest CPU priority so playback never stutters."""
+        url = f"https://archive.org/download/{urllib.parse.quote(show['item'])}/{urllib.parse.quote(show['file'])}"
+        tmp = out.with_suffix(".part.mp4")
+        for attempt, wait in enumerate((0, 5, 20)):  # archive.org throws the odd 5XX
+            time.sleep(wait)
+            print(f"fetching {show['title']}" + (f" (try {attempt + 1})" if attempt else ""), flush=True)
+            r = subprocess.run(["nice", "-n", "19", "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
+                                "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
+                                "-i", url, "-vf", "scale=320:-2", "-ac", "1", "-c:v", "libx264", "-preset", "veryfast",
+                                "-crf", "26", "-c:a", "aac", str(tmp)])
+            if r.returncode == 0:
+                break
+            tmp.unlink(missing_ok=True)
+        else:
+            print(f"fetch failed: {show['title']}", flush=True)
+            return None
+        tmp.rename(out)
+        self.duration(show)
+        return out
 
     def duration(self, show):
         key = slug(show)
