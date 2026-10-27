@@ -1,0 +1,15 @@
+[Unit]
+Description=Channel 4: public-domain lineup to the ESP32 tube TV (tubetv.local:5000)
+After=network-online.target avahi-daemon.service
+Wants=network-online.target
+
+[Service]
+DynamicUser=yes
+StateDirectory=channel4
+Environment=CHANNEL4_CACHE=/var/lib/channel4
+ExecStart=/usr/bin/python3 -u /opt/tube-tv/tools/channel4.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

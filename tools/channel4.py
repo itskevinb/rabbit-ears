@@ -7,21 +7,30 @@ Daytime plays the "day" list (cartoons, shorts) shuffled; from night_starts
 to night_ends it plays the "night" list (creature features). Before each
 show, a station card says what's up next. Clips come from archive.org once,
 shrunk to 320 px wide, into cache/; the next one downloads while the current
-one plays. Each show is streamed with play.py, so its flags pass through
-(e.g. --host=, --fps=).
+one plays (CHANNEL4_CACHE overrides the folder). Each show is streamed with
+play.py, so its flags pass through (e.g. --host=, --fps=).
+
+Runs 24/7 as channel4.service on a Linux container: deploy/.
 """
-import json, random, subprocess, sys, threading, time
+import json, os, random, subprocess, sys, threading, time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
-CACHE = ROOT / "cache"
+CACHE = Path(os.environ.get("CHANNEL4_CACHE", ROOT / "cache"))
 LINEUP = json.loads((Path(__file__).parent / "lineup.json").read_text())
 PLAY = [sys.executable, "-u", str(Path(__file__).parent / "play.py")]
 passthrough = [a for a in sys.argv[1:] if a.startswith("--") and a != "--fetch"]
-FONT = "/System/Library/Fonts/Helvetica.ttc"
+
+def font(size):
+    """Bold sans: Helvetica on the Mac, DejaVu on the station's Debian box."""
+    for path, index in (("/System/Library/Fonts/Helvetica.ttc", 1),
+                        ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 0)):
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size, index=index)
+    return ImageFont.load_default(size)
 
 
 def slug(show):
@@ -53,14 +62,14 @@ def station_card(show):
         return out
     img = Image.new("L", (640, 480), 40)
     d = ImageDraw.Draw(img)
-    big, mid, small = (ImageFont.truetype(FONT, s, index=1) for s in (150, 40, 30))
+    big, mid, small = (font(s) for s in (150, 40, 30))
     d.ellipse([200, 40, 440, 280], fill=230, outline=0, width=10)
     d.text((320, 160), "4", font=big, fill=0, anchor="mm")
     d.text((320, 320), "CHANNEL 4", font=mid, fill=230, anchor="mm")
     d.text((320, 375), "UP NEXT", font=small, fill=170, anchor="mm")
     title = show["title"]
     size = 34 if len(title) < 32 else 26
-    d.text((320, 425), f"{title} ({show['year']})", font=ImageFont.truetype(FONT, size, index=1),
+    d.text((320, 425), f"{title} ({show['year']})", font=font(size),
            fill=230, anchor="mm")
     png = out.with_suffix(".png")
     img.save(png)
