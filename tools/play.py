@@ -49,15 +49,15 @@ limit = ["-t", dur] if dur else []
 vf = (f"fps={fps},scale={W}:{H}:force_original_aspect_ratio=decrease,"
       f"normalize=smoothing={3 * fps}:independence=0,"
       f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,format=gray")
-video = subprocess.Popen(["ffmpeg", "-loglevel", "error", *vin, *limit, "-vf", vf, "-an",
+video = subprocess.Popen(["ffmpeg", "-nostdin", "-loglevel", "error", *vin, *limit, "-vf", vf, "-an",
                           "-f", "rawvideo", "-"], stdout=subprocess.PIPE)
 # Film mixes are quiet; squash them hard so the sound uses the full +/-25 kHz.
 af = ("highpass=f=100,lowpass=f=7000,"
       "acompressor=threshold=-28dB:ratio=6:attack=5:release=150:makeup=4,dynaudnorm=p=0.9:m=40,"
       "aemphasis=mode=production:type=75fm,volume=9dB,alimiter=limit=0.95")
-audio = subprocess.run(["ffmpeg", "-loglevel", "error", *ain, *limit, "-vn", "-ac", "1",
-                        "-ar", str(RATE), "-af", af, "-f", "mulaw", "-"],
-                       stdout=subprocess.PIPE, check=True).stdout
+# Streamed alongside the video, so a feature film starts right away.
+audio = subprocess.Popen(["ffmpeg", "-nostdin", "-loglevel", "error", *ain, *limit, "-vn", "-ac", "1",
+                          "-ar", str(RATE), "-af", af, "-f", "mulaw", "-"], stdout=subprocess.PIPE)
 
 cmd = lambda letter: bytes([0xA5, 0x5A, ord("C"), ord(letter)])
 setup = (cmd({"old": "O", "six": "N", "w1": "W", "w2": "X", "w4": "Y"}[sound])
@@ -109,7 +109,7 @@ while True:
     hi, lo = pic[0::2].translate(HI), pic[1::2].translate(LO)
     packed = (int.from_bytes(hi, "big") | int.from_bytes(lo, "big")).to_bytes(len(hi), "big")
     a0, a1 = frame_no * RATE // fps, (frame_no + 1) * RATE // fps
-    snd = audio[a0:a1].ljust(a1 - a0, b"\xff")  # 0xFF = mu-law zero
+    snd = audio.stdout.read(a1 - a0).ljust(a1 - a0, b"\xff")  # 0xFF = mu-law zero
     z = zlib.compress(packed, 6) if not usb else b""
     if z and len(z) <= ZBUF:
         send(b"\xa5\x5aV3" + struct.pack("<HH", len(snd), len(z)) + z + snd)

@@ -1,0 +1,18 @@
+{
+  "day": [
+    {"title": "Superman: The Mechanical Monsters", "year": 1941, "item": "superman_the_mechanical_monsters", "file": "superman_the_mechanical_monsters_512kb.mp4"},
+    {"title": "Popeye Meets Sindbad the Sailor", "year": 1936, "item": "POPEYEMeetsSindbadTheSailor1936", "file": "POPEYE meets Sindbad The Sailor (1936).mp4"},
+    {"title": "Falling Hare", "year": 1943, "item": "falling-hare-1943-restored", "file": "S09E002_Falling Hare.ia.mp4"},
+    {"title": "The Wacky Wabbit", "year": 1942, "item": "the-wacky-wabbit", "file": "The Wacky Wabbit.ia.mp4"},
+    {"title": "Case of the Missing Hare", "year": 1942, "item": "BugsBunnyCaseOfTheMissingHare", "file": "Merrie Melodies - Bugs Bunny - Case Of The Missing Hare (1942)-dyQ4EntAyhc.mp4"},
+    {"title": "The Three Stooges: Disorder in the Court", "year": 1936, "item": "disorder_in_the_court", "file": "disorder_in_the_court_512kb.mp4"},
+    {"title": "The Three Stooges: Brideless Groom", "year": 1947, "item": "brideless_groom", "file": "brideless_groom_512kb.mp4"}
+  ],
+  "night": [
+    {"title": "Night of the Living Dead", "year": 1968, "item": "night_of_the_living_dead_dvd", "file": "Night.mp4"},
+    {"title": "Nosferatu", "year": 1922, "item": "Nosferatu_most_complete_version_93_mins.", "file": "Nosferatu_1922_Symphony_of_Horror_512kb.mp4"},
+    {"title": "Carnival of Souls", "year": 1962, "item": "CarnivalofSouls", "file": "CarnivalOfSouls_512kb.mp4"}
+  ],
+  "night_starts": 21,
+  "night_ends": 6
+}
