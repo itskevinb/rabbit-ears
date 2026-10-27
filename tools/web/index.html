@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Channel 4</title>
+<style>
+  :root {
+    --bg: #121212; --panel: #1d1d1d; --line: #2e2e2e; --text: #e8e6e1; --dim: #9a978f;
+    --accent: #e9d8a6; --on: #7bd389; --warn: #f2b25c; --off: #e5735f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 -apple-system, system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .logo { width: 44px; height: 44px; border-radius: 50%; background: var(--accent); color: #111;
+          display: grid; place-items: center; font: 800 26px/1 system-ui; flex: none; }
+  header h1 { font-size: 20px; margin: 0; letter-spacing: .08em; }
+  header .meta { margin-left: auto; text-align: right; color: var(--dim); font-size: 13px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line); font-size: 12px; }
+  .badge.on { color: var(--on); border-color: var(--on); }
+  .badge.warn { color: var(--warn); border-color: var(--warn); }
+  .badge.off { color: var(--off); border-color: var(--off); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); margin: 0 0 10px; }
+  .screen { background: #000; border-radius: 10px; padding: 10px; }
+  .screen img { width: 100%; aspect-ratio: 4/3; display: block; image-rendering: pixelated; border-radius: 6px; }
+  .now { margin-top: 10px; }
+  .now .title { font-size: 18px; font-weight: 650; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; margin: 8px 0 4px; overflow: hidden; }
+  .bar div { height: 100%; background: var(--accent); width: 0; }
+  .row { display: flex; justify-content: space-between; color: var(--dim); font-size: 13px; gap: 8px; flex-wrap: wrap; }
+  .buttons { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+  button { background: #2a2a2a; color: var(--text); border: 1px solid var(--line); border-radius: 9px;
+           padding: 10px 12px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--dim); }
+  button.primary { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 650; }
+  button.small { padding: 5px 9px; font-size: 13px; }
+  button:disabled { opacity: .4; cursor: default; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .tabs button.active { background: var(--accent); color: #111; border-color: var(--accent); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li.show { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  li.show:first-child { border-top: 0; }
+  li.show .name { flex: 1 1 200px; }
+  li.show .name small { color: var(--dim); display: block; }
+  li.show.playing .name { color: var(--accent); }
+  .actions { display: flex; gap: 4px; flex-wrap: wrap; }
+  label { display: block; margin: 10px 0 4px; color: var(--dim); font-size: 13px; }
+  input[type=text], input[type=search], select { width: 100%; background: #111; color: var(--text); border: 1px solid var(--line);
+         border-radius: 8px; padding: 9px 10px; font: inherit; }
+  input[type=range] { width: 100%; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .note { color: var(--dim); font-size: 13px; margin: 6px 0 0; }
+  .results li { padding: 8px 0; border-top: 1px solid var(--line); cursor: pointer; }
+  .results li:hover { color: var(--accent); }
+  .results small { color: var(--dim); }
+  #picker { display: none; border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-top: 10px; }
+  .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: #333; padding: 8px 14px;
+           border-radius: 9px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  @media (max-width: 480px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="logo">4</div>
+    <h1>CHANNEL 4</h1>
+    <div class="meta"><span id="clock"></span><br><span id="block" class="badge"></span> <span id="mode" class="badge"></span></div>
+  </header>
+
+  <section>
+    <div class="screen"><img id="frame" alt="What's on the TV now"></div>
+    <div class="now">
+      <div class="title" id="nowTitle">—</div>
+      <div class="bar"><div id="progress"></div></div>
+      <div class="row"><span id="elapsed"></span><span id="upNext"></span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Remote</h2>
+    <div class="buttons">
+      <button class="primary" onclick="post('/api/skip')">Skip ⏭</button>
+      <button onclick="mode('lineup')">Back to the lineup</button>
+      <button onclick="mode('standby')">Please stand by</button>
+      <button onclick="mode('testcard')">Test pattern</button>
+      <button onclick="mode('off')">Sign off</button>
+    </div>
+    <p class="note">The test pattern is for tuning: turn the fine tuning until the wedges at the bottom are sharpest.</p>
+  </section>
+
+  <section>
+    <h2>Lineup</h2>
+    <div class="tabs">
+      <button id="tab-day" onclick="tab='day'; renderLineup()">Daytime</button>
+      <button id="tab-night" onclick="tab='night'; renderLineup()">Late night</button>
+    </div>
+    <ul id="shows"></ul>
+    <div class="grid2">
+      <div><label for="nightStarts">Late night starts</label><select id="nightStarts"></select></div>
+      <div><label for="nightEnds">Late night ends</label><select id="nightEnds"></select></div>
+    </div>
+    <p class="note">Shows download from archive.org the first time they're picked.</p>
+  </section>
+
+  <section>
+    <h2>Add a show</h2>
+    <form onsubmit="search(event)"><input type="search" id="q" placeholder="Search archive.org: Popeye, Three Stooges, Dracula…"></form>
+    <ul class="results" id="results"></ul>
+    <div id="picker">
+      <label for="pTitle">Title</label><input type="text" id="pTitle">
+      <div class="grid2">
+        <div><label for="pYear">Year</label><input type="text" id="pYear"></div>
+        <div><label for="pBlock">Block</label><select id="pBlock"><option value="day">Daytime</option><option value="night">Late night</option></select></div>
+      </div>
+      <label for="pFile">Video file</label><select id="pFile"></select>
+      <p class="note">Only add films that are in the public domain.</p>
+      <div class="buttons" style="margin-top:10px"><button class="primary" onclick="addShow()">Add to the lineup</button>
+        <button onclick="hidePicker()">Cancel</button></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Picture and sound</h2>
+    <label>Frame rate: <b id="fpsV"></b> fps</label><input type="range" id="fps" min="8" max="30" step="1">
+    <label>Brightness: <b id="brightnessV"></b></label><input type="range" id="brightness" min="-0.5" max="0.5" step="0.05">
+    <label>Contrast: <b id="contrastV"></b></label><input type="range" id="contrast" min="0.3" max="3" step="0.05">
+    <div class="grid2">
+      <div><label for="sound">Sound method</label>
+        <select id="sound">
+          <option value="w4">Clean (recommended)</option>
+          <option value="w2">Clean, faster corrections</option>
+          <option value="w1">Clean, fastest (specks in the picture)</option>
+          <option value="old">Original (distorted)</option>
+          <option value="six">Six-phase (garbled on this set)</option>
+        </select></div>
+      <div><label for="dither">Moving grain</label>
+        <select id="dither"><option value="1">On (smoother)</option><option value="0">Off (fixed stripes)</option></select></div>
+    </div>
+    <div class="buttons" style="margin-top:12px"><button class="primary" onclick="saveSettings()">Apply</button>
+      <button onclick="resetSettings()">Back to defaults</button></div>
+    <p class="note">Picture changes take effect within a second; frame rate above 24 can outrun the Wi-Fi link.</p>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+let state = null, tab = 'day', settingsDirty = false, picked = null;
+const $ = id => document.getElementById(id);
+const fmt = s => { s = Math.max(0, Math.round(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 1800); }
+
+async function post(url, body) {
+  const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+  const j = await r.json();
+  if (!r.ok) { toast(j.error || 'That did not work'); return null; }
+  state = j; render(); return j;
+}
+function mode(m) { post('/api/mode', {mode: m}).then(s => s && toast({lineup: 'Back to the lineup', standby: 'Standing by',
+  testcard: 'Test pattern on', off: 'Signed off'}[m])); }
+
+async function refresh() {
+  try { state = await (await fetch('/api/state')).json(); render(); } catch (e) { $('nowTitle').textContent = 'Station not answering'; }
+}
+
+function render() {
+  const s = state;
+  $('clock').textContent = s.clock;
+  $('block').textContent = s.block === 'night' ? 'Late night' : 'Daytime';
+  const m = $('mode');
+  m.textContent = {lineup: 'On the air', standby: 'Standing by', testcard: 'Test pattern', off: 'Off the air'}[s.mode];
+  m.className = 'badge ' + {lineup: 'on', standby: 'warn', testcard: 'warn', off: 'off'}[s.mode];
+  if (s.mode !== 'lineup') { $('nowTitle').textContent = m.textContent; $('elapsed').textContent = ''; $('progress').style.width = '0'; }
+  else if (s.now) {
+    $('nowTitle').textContent = s.now.title + (s.now.year ? ` (${s.now.year})` : '');
+    $('elapsed').textContent = s.length ? `${fmt(s.pos)} / ${fmt(s.length)}` : fmt(s.pos);
+    $('progress').style.width = s.length ? Math.min(100, 100 * s.pos / s.length) + '%' : '0';
+  }
+  $('upNext').textContent = s.mode === 'lineup' && s.upcoming ? 'Up next: ' + s.upcoming.title : '';
+  renderLineup();
+  if (!settingsDirty) loadSettings();
+}
+
+function renderLineup() {
+  if (!state) return;
+  $('tab-day').classList.toggle('active', tab === 'day');
+  $('tab-night').classList.toggle('active', tab === 'night');
+  const list = state.lineup[tab] || [], other = tab === 'day' ? 'Late night' : 'Daytime';
+  $('shows').innerHTML = list.length ? list.map((s, i) => {
+    const playing = state.now && state.now.slug === s.slug && state.mode === 'lineup';
+    const status = state.fetching.includes(s.slug) ? 'downloading…' : s.cached ? 'ready' : 'not downloaded yet';
+    return `<li class="show${playing ? ' playing' : ''}"><div class="name">${esc(s.title)}${s.year ? ' (' + esc(s.year) + ')' : ''}
+      <small>${playing ? 'on now · ' : ''}${status}</small></div><div class="actions">
+      <button class="small" onclick="playNow('${s.slug}')">Play now</button>
+      <button class="small" onclick="move(${i},-1)" ${i ? '' : 'disabled'}>↑</button>
+      <button class="small" onclick="move(${i},1)" ${i < list.length - 1 ? '' : 'disabled'}>↓</button>
+      <button class="small" onclick="swapBlock(${i})">To ${other}</button>
+      <button class="small" onclick="removeShow(${i})">Remove</button></div></li>`;
+  }).join('') : '<li class="show"><div class="name"><small>No shows here yet. Add one below.</small></div></li>';
+  for (const [id, key] of [['nightStarts', 'night_starts'], ['nightEnds', 'night_ends']]) {
+    const sel = $(id);
+    if (!sel.options.length) {
+      for (let h = 0; h < 24; h++) sel.add(new Option(new Date(2000, 0, 1, h).toLocaleTimeString([], {hour: 'numeric'}), h));
+      sel.onchange = () => saveLineup({[key]: +sel.value}, 'Hours saved');
+    }
+    if (document.activeElement !== sel) sel.value = state.lineup[key];
+  }
+}
+
+function plainLineup() {
+  const strip = s => ({title: s.title, year: s.year, item: s.item, file: s.file});
+  return {day: state.lineup.day.map(strip), night: state.lineup.night.map(strip),
+          night_starts: state.lineup.night_starts, night_ends: state.lineup.night_ends};
+}
+function saveLineup(patch, msg) {
+  const l = plainLineup();
+  if (typeof patch === 'function') patch(l); else Object.assign(l, patch);
+  return post('/api/lineup', l).then(s => s && msg && toast(msg));
+}
+function playNow(slug) { post('/api/play', {slug}).then(s => s && toast('Switching…')); }
+function move(i, d) { saveLineup(l => { const a = l[tab]; [a[i], a[i + d]] = [a[i + d], a[i]]; }); }
+function swapBlock(i) { const to = tab === 'day' ? 'night' : 'day'; saveLineup(l => l[to].push(...l[tab].splice(i, 1)), 'Moved'); }
+function removeShow(i) {
+  const s = state.lineup[tab][i];
+  if (confirm(`Remove ${s.title} from the lineup?`)) saveLineup(l => l[tab].splice(i, 1), 'Removed');
+}
+
+async function search(e) {
+  e.preventDefault();
+  const q = $('q').value.trim(); if (!q) return;
+  $('results').innerHTML = '<li><small>Searching…</small></li>'; hidePicker();
+  const r = await fetch('/api/search?q=' + encodeURIComponent(q)); const items = await r.json();
+  if (!r.ok) { $('results').innerHTML = `<li><small>${esc(items.error)}</small></li>`; return; }
+  $('results').innerHTML = items.length ? items.map(d => `<li data-item="${esc(d.item)}">${esc(d.title)}
+    <small>${d.year ? esc(d.year) + ' · ' : ''}${(d.downloads || 0).toLocaleString()} views</small></li>`).join('')
+    : '<li><small>Nothing found</small></li>';
+  for (const li of $('results').querySelectorAll('li[data-item]')) li.onclick = () => pick(li.dataset.item);
+}
+async function pick(item) {
+  toast('Looking at the files…');
+  const r = await fetch('/api/files?item=' + encodeURIComponent(item)); const d = await r.json();
+  if (!r.ok || !d.files.length) { toast(d.error || 'No playable video files there'); return; }
+  picked = {item};
+  $('pTitle').value = d.title || item; $('pYear').value = d.year || ''; $('pBlock').value = tab;
+  $('pFile').innerHTML = d.files.map(f => `<option value="${esc(f.file)}">${esc(f.file)} — ${(f.size / 1e6).toFixed(0)} MB${f.length ? ', ' + fmt(f.length) : ''}</option>`).join('');
+  $('picker').style.display = 'block'; $('picker').scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+function hidePicker() { $('picker').style.display = 'none'; picked = null; }
+function addShow() {
+  if (!picked) return;
+  const show = {title: $('pTitle').value.trim(), year: $('pYear').value.trim(), item: picked.item, file: $('pFile').value};
+  const block = $('pBlock').value;
+  saveLineup(l => l[block].push(show), 'Added. It downloads the first time it plays.').then(() => { tab = block; hidePicker(); renderLineup(); });
+}
+
+const sliders = ['fps', 'brightness', 'contrast'];
+function loadSettings() {
+  const s = state.settings;
+  for (const k of sliders) { $(k).value = s[k]; $(k + 'V').textContent = s[k]; }
+  $('sound').value = s.sound; $('dither').value = s.dither ? '1' : '0';
+}
+for (const k of sliders) $(k).oninput = () => { settingsDirty = true; $(k + 'V').textContent = $(k).value; };
+$('sound').onchange = $('dither').onchange = () => { settingsDirty = true; };
+function saveSettings() {
+  post('/api/settings', {fps: +$('fps').value, brightness: +$('brightness').value, contrast: +$('contrast').value,
+                         sound: $('sound').value, dither: $('dither').value === '1'})
+    .then(s => { if (s) { settingsDirty = false; toast('Applied'); } });
+}
+function resetSettings() {
+  post('/api/settings', {fps: 24, brightness: 0, contrast: 1, sound: 'w4', dither: true})
+    .then(s => { if (s) { settingsDirty = false; loadSettings(); toast('Defaults restored'); } });
+}
+
+setInterval(() => { $('frame').src = '/api/frame.png?t=' + Date.now(); }, 1000);
+setInterval(refresh, 2000);
+$('frame').src = '/api/frame.png'; refresh();
+</script>
+</body>
+</html>
