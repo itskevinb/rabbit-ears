@@ -13,14 +13,15 @@ baked into a file are found once and cut off, and a picture that's nearly 4:3
 fills the screen.
 
 The web page (tools/web/index.html, LAN only, no sign-in) shows what's on
-with a live thumbnail and has the remote: skip, play a show now, stand by,
-test pattern, sign off, mute, volume; the lineup editor with an archive.org search; and
-the picture/sound settings. "Play next" queues shows ahead of the lineup. Lineup and settings live in the cache folder
+with a live thumbnail, on four pages: Now (the remote: skip, stand by, test
+pattern, sign off, mute, volume, what's coming up), Lineup (the editor with an
+archive.org search), Downloads (what's cached, space left) and Settings
+(picture, sound, the late-night hours). "Play next" queues shows ahead of the lineup. Lineup and settings live in the cache folder
 (CHANNEL4_CACHE, default ./cache), seeded from tools/lineup.json.
 
 Runs 24/7 as a systemd service on any small Linux box: see deploy/.
 """
-import io, json, os, random, re, subprocess, sys, threading, time, urllib.parse, urllib.request
+import io, json, os, random, re, shutil, subprocess, sys, threading, time, urllib.parse, urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -439,10 +440,19 @@ class Station:
 
     # -- remote -------------------------------------------------------------------
     def state(self):
-        show = lambda s: s and {**s, "slug": slug(s), "cached": self.path(s).exists()}
+        def show(s):
+            if not s:
+                return s
+            path = self.path(s)
+            size = path.stat().st_size if path.exists() else 0
+            return {**s, "slug": slug(s), "cached": bool(size), "mb": round(size / 1e6, 1),
+                    "length": round(self.durations.get(slug(s), 0))}
         lineup = {k: [show(s) for s in self.lineup.get(k, [])] for k in ("day", "night")}
         upcoming = self.queue[0] if self.queue else self.upcoming
+        later = [s for s in self.bags.get(self.block(), []) if not upcoming or slug(s) != slug(upcoming)][:4]
+        disk = shutil.disk_usage(CACHE)
         return {"mode": self.mode, "block": self.block(), "now": show(self.now), "upcoming": show(upcoming),
+                "later": [show(s) for s in later], "disk": {"free_mb": disk.free // 10**6, "total_mb": disk.total // 10**6},
                 "queue": [show(q) for q in self.queue],
                 "pos": round(self.pos), "length": round(self.length), "settings": self.settings,
                 "lineup": {**self.lineup, **lineup}, "fetching": sorted(self.fetching), "bulk": self.bulk,
