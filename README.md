@@ -45,7 +45,7 @@ The big comment at the top of [`rf-video/rf-video.ino`](rf-video/rf-video.ino) h
 
 ## What you need
 
-- A **classic ESP32** dev board (tested on an ESP32 DevKit V1). The firmware relies on the classic ESP32's I2S and APLL.
+- An **ESP32** dev board: a classic ESP32 (tested on a DevKit V1), or an **ESP32-S3 with PSRAM** (tested on a Freenove ESP32-S3 N16R8), which is the better choice. See [the S3](#the-esp32-s3).
 - Two short insulated jumper wires, one on **D4** (GPIO4, picture) and one on **D5** (GPIO5, sound).
 - An analog TV that can tune VHF channel 4. That means an old set; anything digital-only won't see it.
 - [Arduino CLI](https://arduino.github.io/arduino-cli/) or the Arduino IDE with the **esp32 core 3.x** (built with 3.3.0).
@@ -66,6 +66,23 @@ arduino-cli upload  --fqbn esp32:esp32:esp32 -p /dev/cu.usbserial-0001 rf-video
 ```
 
 The board joins your Wi-Fi as `tubetv.local` and listens on TCP port 5000.
+
+With `OTA_PASSWORD` set in `wifi_secrets.h`, later updates go over Wi-Fi: `sh tools/ota.sh` builds and pushes from the station box, pausing Channel 4 for about a minute. Put the board's FQBN in `deploy/fqbn` (one line) if it isn't a classic ESP32.
+
+### The ESP32-S3
+
+The S3 has no APLL, so there's no 27 MHz bit clock, and no whole-number division of its 160 MHz PLL puts two pulse trains' harmonics 4.5 MHz apart. The firmware works around that when it's built for an S3:
+
+- **Picture:** R = 160 MHz / 6 = 26.667 Mbit/s exactly. A pulse every other bit is a 13.333 MHz train; its 5th harmonic, 66.667 MHz, sits 0.6 MHz under channel 4's picture carrier, within the fine tuning. Lines are 53 words (63.6 us), 60.01 Hz.
+- **Sound** has to be 71.1667 MHz. The 3-bit pattern's 8th harmonic is 71.111 MHz, so the per-word FM carries a +55.6 kHz offset: the quiet carrier steps 120 degrees every 5 words, a 15-word cycle whose strongest line is exactly 71.1667 MHz. [`rf-s3/`](rf-s3/rf-s3.ino) is the test card for it: quiet with the carrier on, a buzz with it off, and a hiss with it stepped the wrong way.
+- **Frames live in PSRAM**, eight of them, and there's ~170 KB of internal RAM to spare (the classic runs at ~49 KB, close to where Wi-Fi gives up). It keeps up at 30 fps; the classic manages about 88% of real time there.
+- Audio is one sample per line, so on the S3 everything plays 0.6% fast. Nobody hears it.
+
+```sh
+arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB rf-video
+```
+
+Use GPIO4 (picture) and GPIO5 (sound), as on the classic.
 
 ## Playing something
 
@@ -120,13 +137,15 @@ The shows in the default lineup are films generally treated as public domain in 
 |---|---|
 | `rf-test/` | First RF smoke test: a 13.33 MHz LEDC carrier, 5th harmonic near channel 4 |
 | `rf-tv/` | Still test card plus silent sound carrier; `picture.h` is made by `tools/make_image.py` |
-| `rf-video/` | The station firmware: streamed video and FM sound |
+| `rf-s3/` | The test card on an ESP32-S3: 66.667 MHz picture, stepped sound carrier |
+| `rf-video/` | The station firmware (classic ESP32 or S3): streamed video and FM sound |
 | `i2s-selftest/` | Bench check of the I2S bit order on the wire |
 | `tools/tvlink.py` | Shared streaming code: ffmpeg decode, packing, audio filters, the Wi-Fi link |
 | `tools/play.py` | Stream one file by hand |
 | `tools/station.py`, `tools/web/` | The Channel 4 station and its web remote |
 | `tools/tv.py` | Serial tuning for `rf-tv` (`python3 tools/tv.py d0.2`) |
 | `tools/look.sh` | macOS camera and mic capture, to check the TV's picture and sound from a script |
+| `tools/ota.sh` | Over-the-air firmware update, pushed from the station box |
 | `deploy/` | systemd unit and push script |
 
 ## Limits

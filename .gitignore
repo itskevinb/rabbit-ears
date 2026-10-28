@@ -3,3 +3,4 @@ rf-video/wifi_secrets.h
 cache/
 deploy/host
 __pycache__/
+deploy/fqbn

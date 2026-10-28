@@ -16,7 +16,11 @@ ESPOTA=$(ls ~/Library/Arduino15/packages/esp32/hardware/esp32/*/tools/espota.py 
 [ -n "$ESPOTA" ] || { echo "espota.py not found (esp32 Arduino core)" >&2; exit 1; }
 BUILD=$(mktemp -d)
 trap 'rm -rf "$BUILD"' EXIT
-arduino-cli compile --fqbn esp32:esp32:esp32 --output-dir "$BUILD" rf-video | tail -2
+# The board: $FQBN, else the first line of deploy/fqbn (gitignored), else a classic ESP32.
+FQBN=${FQBN:-$(sed -n '/^[^#[:space:]]/{s/[[:space:]]*$//;p;q;}' deploy/fqbn 2>/dev/null)}
+FQBN=${FQBN:-esp32:esp32:esp32}
+echo "building for $FQBN"
+arduino-cli compile --fqbn "$FQBN" --output-dir "$BUILD" rf-video | tail -2
 scp -q "$BUILD/rf-video.ino.bin" "$ESPOTA" "$HOST:/tmp/"
 # The password goes to the box over stdin, so it isn't in the ssh command line;
 # espota.py itself takes it as an argument there, for the few seconds it runs.

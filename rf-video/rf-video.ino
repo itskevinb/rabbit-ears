@@ -50,6 +50,17 @@
 // ArduinoOTA on UDP 3232, password-protected, by IP (our own mDNS stays as is).
 // An update drops the stream first, for the heap, and reboots into the new build.
 //
+// ESP32-S3 (built when the target is an S3, e.g. Freenove N16R8 with octal
+// PSRAM): there's no APLL, so R = 160 MHz / 6 = 26.667 Mbit/s, the picture is
+// the 5th harmonic of 13.333 MHz (66.667 MHz, in the set's fine tuning) and
+// lines are 53 words (63.6 us, 60.01 Hz). No whole-number plan puts the sound
+// 4.5 MHz up, so the per-word FM carries a +55.6 kHz offset: its quiet carrier
+// steps 120 degrees every 5 words, a 15-word cycle whose strongest line is
+// exactly 71.1667 MHz (bench-tested in rf-s3: quiet; off = buzz; the wrong way =
+// hiss). Audio is one sample per line, so it runs at 15723 Hz, 0.6% fast:
+// everything plays 0.6% quick, which nobody hears. Packets live in PSRAM, 8 of
+// them. The S3 keeps to the per-word methods (O and N are ignored).
+//
 // Hold the wires NEAR the antenna screws, never touching: hot chassis.
 
 #include <ArduinoOTA.h>
@@ -59,8 +70,19 @@
 #include "miniz.h"  // ESP32 ROM inflate
 #include "wifi_secrets.h"  // WIFI_SSID, WIFI_PSK; not committed
 
+#if CONFIG_IDF_TARGET_ESP32S3
+const uint32_t BIT_RATE = 26666667;                       // 160 MHz / 6
+const int LINE_WORDS = 53, LINE_BITS = LINE_WORDS * 32;  // 1696 bits = 63.6 us
+const float SOUND_OFFSET_HZ = 55555.6f;  // 3-bit pattern's 8th harmonic (71.111) to picture + 4.5 MHz (71.1667)
+const int WORD_EVERY[3] = {1, 5, 5};      // decide every n words: must divide 5 for a clean quiet carrier
+#define I2S_SOURCE I2S_CLK_SRC_PLL_160M
+#else
 const uint32_t BIT_RATE = 27000000;
 const int LINE_WORDS = 54, LINE_BITS = LINE_WORDS * 32;  // 1728 bits = 64.0 us
+const float SOUND_OFFSET_HZ = 0;          // 72.0 MHz is exactly picture + 4.5 MHz
+const int WORD_EVERY[3] = {1, 2, 4};
+#define I2S_SOURCE I2S_CLK_SRC_APLL
+#endif
 const int SLOTS = LINE_BITS / 2;                         // picture pulse slots per line
 const int LINES = 262, VSYNC_LINES = 3, FIRST_ACTIVE = 20, LAST_ACTIVE = 259;
 const float SLOTS_PER_US = BIT_RATE / 2 / 1e6f;
@@ -69,7 +91,11 @@ const int SYNC = 256, BLACK = 192, WHITE = 32;  // carrier strength, 256 = every
 
 const int VID_W = 256, VID_H = 192, VID_BYTES = VID_W * VID_H / 2;
 const int AUD_MAX = 800;  // audio samples per packet (24 fps needs 651; USB's ~3 fps would need 5208, so USB is for commands now)
+#if CONFIG_IDF_TARGET_ESP32S3
+const int NQ = 8;  // in PSRAM: a third of a second of slack against Wi-Fi hiccups
+#else
 const int NQ = 3;  // 26 KB each; with Wi-Fi up, 4 don't fit
+#endif
 const int BATCH = 8;  // picture lines per I2S write
 
 const int SOUND_BLOCK_BITS = LINE_BITS;  // one audio sample
@@ -81,7 +107,7 @@ struct Packet {
   uint8_t audio[AUD_MAX];  // mu-law (G.711): ~13-bit quiet-passage quality in 8 bits
   int n_audio;
 };
-Packet *queue[NQ];  // on the heap: 3 x 26 KB is too much for static DRAM
+Packet *queue[NQ];  // on the heap (PSRAM on the S3): 3 x 26 KB is too much for static DRAM
 volatile bool full[NQ];
 volatile bool stream_reset;  // set by loop() for a new connection; the sound task empties the queue
 volatile int showing = -1;  // packet whose picture is on screen
@@ -138,7 +164,7 @@ i2s_chan_handle_t start_i2s(i2s_port_t port, int pin) {
     .gpio_cfg = {.mclk = I2S_GPIO_UNUSED, .bclk = I2S_GPIO_UNUSED, .ws = I2S_GPIO_UNUSED,
                  .dout = (gpio_num_t)pin, .din = I2S_GPIO_UNUSED, .invert_flags = {}},
   };
-  sc.clk_cfg.clk_src = I2S_CLK_SRC_APLL;
+  sc.clk_cfg.clk_src = I2S_SOURCE;
   sc.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_128;
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(h, &sc));
   gpio_set_drive_capability((gpio_num_t)pin, GPIO_DRIVE_CAP_3);
@@ -222,7 +248,7 @@ void build_tables() {
     float dev = ulaw_to_linear(i) / 32768.0f * 25000.0f;  // tables are indexed by the mu-law code
     sound_step[i] = (uint32_t)(3.0f * (1 << 20) / (1.0f + dev / 72e6f) + 0.5f);
     sound_dphase[i] = (uint32_t)(int32_t)(dev / 9e6f * 4294967296.0f);
-    word_dphase[i] = (uint32_t)(int32_t)(dev * 32 / 27e6f * 4294967296.0f);
+    word_dphase[i] = (uint32_t)(int32_t)((dev + SOUND_OFFSET_HZ) * 32 / BIT_RATE * 4294967296.0f);
   }
   for (int i = 0; i < 256; i++) q_of_top[i] = i * 6 / 256;
   for (int r = 0; r < 3; r++) {
@@ -369,11 +395,16 @@ void IRAM_ATTR make_sound_block(uint32_t dphase, uint32_t *buf, uint32_t &phase,
 // ~400 kHz (every word = 844k decisions/s): above the audio, and, with
 // single-bit pulses and few decisions, mostly clear of the picture. Simulated
 // ~43 dB audio SNR to 7 kHz vs ~2 dB for method 0.
-void make_word_sound_block(uint32_t dword, int every, uint32_t *buf, uint32_t &phase, uint32_t &err, int &q) {
+void make_word_sound_block(uint32_t dword, int every, uint32_t *buf, uint32_t &phase, uint32_t &err, int &q,
+                           int &grid, int &count) {
   uint32_t ph = phase, e = err;
-  int grid = 0;  // bit 0 of this word, mod 3 (a block is 3456 bits, a multiple of 3)
+  // grid (bit 0 of this word, mod 3) and count (words since the last decision)
+  // carry over between blocks: a block isn't always a multiple of 3 bits (1696
+  // on the S3) or of `every` words (54 or 53), and restarting either at each
+  // block glitched the quiet carrier's steps once a line.
   for (int w = 0; w < SOUND_BLOCK_WORDS; w++) {
-    if (w % every == 0) {
+    if (count >= every) count = 0;  // `every` changed
+    if (count++ == 0) {
       ph += dword * every;
       uint32_t u = ph - e;
       q = ((u + PHASE120 / 2) >> 8) * 3 >> 24;
@@ -401,7 +432,7 @@ void sound_task(void *) {
   uint32_t pos = 0;  // old method: next pulse, bits from block start, 12.20 fixed point
   uint32_t phase = 0, err = 0;  // method 1
   uint32_t wphase = 0, werr = 0;  // per-word methods
-  int wq = 0;
+  int wq = 0, wgrid = 0, wcount = 0;
   int playing = -1, idx = 0, next = 0;
   for (;;) {
     if (stream_reset) {
@@ -418,7 +449,7 @@ void sound_task(void *) {
     uint8_t sample = playing >= 0 ? queue[playing]->audio[idx] : 0xFF;  // 0xFF = mu-law zero
     uint32_t t0 = micros();
     if (sound_mode >= 2) {
-      make_word_sound_block(word_dphase[(uint8_t)sample], 1 << (sound_mode - 2), buf, wphase, werr, wq);
+      make_word_sound_block(word_dphase[(uint8_t)sample], WORD_EVERY[sound_mode - 2], buf, wphase, werr, wq, wgrid, wcount);
     } else if (sound_mode == 1) {
       make_sound_block(sound_dphase[(uint8_t)sample], buf, phase, err);
     } else {
@@ -444,7 +475,11 @@ void sound_task(void *) {
 void setup() {
   Serial.setRxBufferSize(1024);  // USB carries commands; Wi-Fi carries the stream
   Serial.begin(921600);
+#if CONFIG_IDF_TARGET_ESP32S3
+  for (int i = 0; i < NQ; i++) queue[i] = (Packet *)heap_caps_malloc(sizeof(Packet), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
   for (int i = 0; i < NQ; i++) queue[i] = (Packet *)malloc(sizeof(Packet));
+#endif
   build_tables();
   self_test();
   pic_tx = start_i2s(I2S_NUM_0, 4);
@@ -535,13 +570,20 @@ template <typename Link> bool read_full(Link &in, uint8_t *buf, size_t n) {
 template <typename Link> void receive(Link &in, int &matched) {
   static bool compressed;
   if (ota_busy) return;  // the packet slots are gone
+  uint32_t start = millis();
   while (in.available()) {
+    // Hand the core back now and then: with the S3's 8 slots and faster link
+    // the data never ran out, the loop never returned, and core 0's idle task
+    // starved (task watchdog). Between packets, so nothing is cut in half.
+    if (millis() - start > 20) return;
     if (matched != 4) {  // 1 = saw A5, 2 = A5 5A, 3 = "V", 4 = "V2", 5 = "C"
       int c = in.read();
       if (matched == 5) {
         if (c == 'H') ESP.restart();
+#if !CONFIG_IDF_TARGET_ESP32S3  // the old methods assume the 27 MHz grid
         if (c == 'O') sound_mode = 0;
         if (c == 'N') sound_mode = 1;
+#endif
         if (c >= 'W' && c <= 'Y') sound_mode = 2 + (c - 'W');
         if (c == 'D' || c == 'd') line_dither = c == 'D';
         if (c == 'T') throughput_test(in);
