@@ -73,13 +73,13 @@
 #if CONFIG_IDF_TARGET_ESP32S3
 const uint32_t BIT_RATE = 26666667;                       // 160 MHz / 6
 const int LINE_WORDS = 53, LINE_BITS = LINE_WORDS * 32;  // 1696 bits = 63.6 us
-const float SOUND_OFFSET_HZ = 55555.6f;  // 3-bit pattern's 8th harmonic (71.111) to picture + 4.5 MHz (71.1667)
+const int OFFSET_WORDS = 5;  // +55.6 kHz: the quiet carrier steps 120 degrees every 5 words (71.111 -> 71.1667 MHz)
 const int WORD_EVERY[3] = {1, 5, 5};      // decide every n words: must divide 5 for a clean quiet carrier
 #define I2S_SOURCE I2S_CLK_SRC_PLL_160M
 #else
 const uint32_t BIT_RATE = 27000000;
 const int LINE_WORDS = 54, LINE_BITS = LINE_WORDS * 32;  // 1728 bits = 64.0 us
-const float SOUND_OFFSET_HZ = 0;          // 72.0 MHz is exactly picture + 4.5 MHz
+const int OFFSET_WORDS = 0;  // none: 72.0 MHz is exactly picture + 4.5 MHz
 const int WORD_EVERY[3] = {1, 2, 4};
 #define I2S_SOURCE I2S_CLK_SRC_APLL
 #endif
@@ -248,7 +248,7 @@ void build_tables() {
     float dev = ulaw_to_linear(i) / 32768.0f * 25000.0f;  // tables are indexed by the mu-law code
     sound_step[i] = (uint32_t)(3.0f * (1 << 20) / (1.0f + dev / 72e6f) + 0.5f);
     sound_dphase[i] = (uint32_t)(int32_t)(dev / 9e6f * 4294967296.0f);
-    word_dphase[i] = (uint32_t)(int32_t)((dev + SOUND_OFFSET_HZ) * 32 / BIT_RATE * 4294967296.0f);
+    word_dphase[i] = (uint32_t)(int32_t)(dev * 32 / BIT_RATE * 4294967296.0f);
   }
   for (int i = 0; i < 256; i++) q_of_top[i] = i * 6 / 256;
   for (int r = 0; r < 3; r++) {
@@ -396,12 +396,16 @@ void IRAM_ATTR make_sound_block(uint32_t dphase, uint32_t *buf, uint32_t &phase,
 // single-bit pulses and few decisions, mostly clear of the picture. Simulated
 // ~43 dB audio SNR to 7 kHz vs ~2 dB for method 0.
 void make_word_sound_block(uint32_t dword, int every, uint32_t *buf, uint32_t &phase, uint32_t &err, int &q,
-                           int &grid, int &count) {
+                           int &grid, int &count, int &stair) {
   uint32_t ph = phase, e = err;
   // grid (bit 0 of this word, mod 3) and count (words since the last decision)
   // carry over between blocks: a block isn't always a multiple of 3 bits (1696
   // on the S3) or of `every` words (54 or 53), and restarting either at each
   // block glitched the quiet carrier's steps once a line.
+  // On the S3 the +55.6 kHz offset is a separate staircase counted in words
+  // (stair: 0..14, one 120-degree step per 5), not part of the phase step:
+  // 1/15 of a turn isn't exact in 2^32, and the drift made the quantizer's
+  // pattern creep through its states, a sweep every ~5 s on the set.
   for (int w = 0; w < SOUND_BLOCK_WORDS; w++) {
     if (count >= every) count = 0;  // `every` changed
     if (count++ == 0) {
@@ -410,7 +414,12 @@ void make_word_sound_block(uint32_t dword, int every, uint32_t *buf, uint32_t &p
       q = ((u + PHASE120 / 2) >> 8) * 3 >> 24;
       e = q * PHASE120 - u;
     }
-    buf[w] = word_pattern[(q - grid + 3) % 3];
+    int off = 0;
+    if (OFFSET_WORDS) {
+      off = stair / OFFSET_WORDS;
+      if (++stair == 3 * OFFSET_WORDS) stair = 0;
+    }
+    buf[w] = word_pattern[(q + off - grid + 6) % 3];
     grid = (grid + 2) % 3;  // 32 = 2 (mod 3)
   }
   phase = ph;
@@ -432,7 +441,7 @@ void sound_task(void *) {
   uint32_t pos = 0;  // old method: next pulse, bits from block start, 12.20 fixed point
   uint32_t phase = 0, err = 0;  // method 1
   uint32_t wphase = 0, werr = 0;  // per-word methods
-  int wq = 0, wgrid = 0, wcount = 0;
+  int wq = 0, wgrid = 0, wcount = 0, wstair = 0;
   int playing = -1, idx = 0, next = 0;
   for (;;) {
     if (stream_reset) {
@@ -449,7 +458,7 @@ void sound_task(void *) {
     uint8_t sample = playing >= 0 ? queue[playing]->audio[idx] : 0xFF;  // 0xFF = mu-law zero
     uint32_t t0 = micros();
     if (sound_mode >= 2) {
-      make_word_sound_block(word_dphase[(uint8_t)sample], WORD_EVERY[sound_mode - 2], buf, wphase, werr, wq, wgrid, wcount);
+      make_word_sound_block(word_dphase[(uint8_t)sample], WORD_EVERY[sound_mode - 2], buf, wphase, werr, wq, wgrid, wcount, wstair);
     } else if (sound_mode == 1) {
       make_sound_block(sound_dphase[(uint8_t)sample], buf, phase, err);
     } else {
