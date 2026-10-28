@@ -75,6 +75,7 @@ The S3 has no APLL, so there's no 27 MHz bit clock, and no whole-number division
 
 - **Picture:** R = 160 MHz / 6 = 26.667 Mbit/s exactly. A pulse every other bit is a 13.333 MHz train; its 5th harmonic, 66.667 MHz, sits 0.6 MHz under channel 4's picture carrier, within the fine tuning. Lines are 53 words (63.6 us), 60.01 Hz.
 - **Sound** has to be 71.1667 MHz. The 3-bit pattern's 8th harmonic is 71.111 MHz, so the per-word FM carries a +55.6 kHz offset: the quiet carrier steps 120 degrees every 5 words, a 15-word cycle whose strongest line is exactly 71.1667 MHz. [`rf-s3/`](rf-s3/rf-s3.ino) is the test card for it: quiet with the carrier on, a buzz with it off, and a hiss with it stepped the wrong way.
+- **The picture is 288x216** (256x192 on the classic): one row per visible line, square pixels. Tell the station with `CHANNEL4_SIZE=288x216` (the board reports its size in `#status`, and the station warns if they differ).
 - **Frames live in PSRAM**, eight of them, and there's ~170 KB of internal RAM to spare (the classic runs at ~49 KB, close to where Wi-Fi gives up). It keeps up at 30 fps; the classic manages about 88% of real time there.
 - Audio is one sample per line, so on the S3 everything plays 0.6% fast. Nobody hears it.
 
