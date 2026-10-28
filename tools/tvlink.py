@@ -1,13 +1,17 @@
 """Streaming to the ESP32 TV station (rf-video firmware): shared by play.py and station.py.
 
 The stream is framed by A5 5A: "C" + a letter is a command, "V2"/"V3" a
-packet of one 256x192 4-bit picture (V3 zlib-compressed) plus that frame's
+packet of one 4-bit picture (V3 zlib-compressed; 256x192, or 288x216 on an S3) plus that frame's
 share of the mu-law audio at 15625 Hz (one sample per TV line). See
 rf-video/rf-video.ino for the board side.
 """
-import select, socket, struct, subprocess, time, zlib
+import os, select, socket, struct, subprocess, time, zlib
 
-W, H, RATE, PORT = 256, 192, 15625, 5000
+# The picture size the board's firmware was built with: 256x192 on a classic
+# ESP32, 288x216 on an S3. It has to match (the board drops packets of any
+# other size), so set CHANNEL4_SIZE; the board's #status reports its own.
+W, H = (int(v) for v in os.environ.get("CHANNEL4_SIZE", "256x192").lower().split("x"))
+RATE, PORT = 15625, 5000
 SOUND_METHODS = {"w4": "Y", "w2": "X", "w1": "W", "old": "O", "six": "N"}  # see rf-video.ino
 HI = bytes((v >> 4) << 4 for v in range(256))
 LO = bytes(v >> 4 for v in range(256))
@@ -185,6 +189,8 @@ class TV:
                 status[key] = int(value) if value.lstrip("-").isdigit() else value
             if isinstance(status.get("load"), str):  # picture/sound/inflate, % of a core
                 status["load"] = [int(v) for v in status["load"].split("/") if v.isdigit()]
+            if status.get("size") not in (None, f"{W}x{H}") and (not self.board or self.board.get("size") != status["size"]):
+                print(f"board is {status['size']} but we send {W}x{H}: set CHANNEL4_SIZE={status['size']}", flush=True)
             if self.board and status.get("up", 0) < self.board.get("up", 0):
                 print(f"board restarted: reset {status.get('reset')}, up {status.get('up')} s", flush=True)
             self.board = status

@@ -567,7 +567,9 @@ function renderHealth() {
   if (b) {
     rows.push(['Board up for', span(b.up)], ['Last restart', b.reset], ['Wi-Fi signal', b.rssi + ' dBm'],
               ['Wi-Fi joins since boot', b.joins], ['Free memory', `${Math.round(b.heap / 1024)} KB (lowest ${Math.round(b.minheap / 1024)} KB)`],
-              ['Load: picture / sound / inflate', (b.load || []).map(v => v + '%').join(' / ')], ['Reported', ago(b.at)]);
+              ['Load: picture / sound / inflate', (b.load || []).map(v => v + '%').join(' / ')],
+              ['Picture size', b.size ? (b.size === state.size ? b.size : `board ${b.size}, station sends ${state.size}: set CHANNEL4_SIZE`) : state.size],
+              ['Reported', ago(b.at)]);
   }
   setHTML($('health'), rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join(''));
   $('healthNote').textContent = b ? 'The board answers every 30 seconds. A restart shows why it happened (crash, brownout, power-on), which tells a reboot from a Wi-Fi drop.'

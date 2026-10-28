@@ -116,43 +116,52 @@ def font(size):
         return ImageFont.load_default()
 
 
-# ---- cards, drawn straight to a 256x192 grey frame ---------------------------
+# ---- cards: drawn at 256x192, scaled to the board's picture size --------------
+BW, BH = 256, 192
+
+
+def fit(img, resample=Image.BILINEAR):
+    return img if img.size == (W, H) else img.resize((W, H), resample)
+
 
 def channel_card(*lines):
-    img = Image.new("L", (W, H), 40)
+    img = Image.new("L", (BW, BH), 40)
     d = ImageDraw.Draw(img)
     d.ellipse([88, 10, 168, 90], fill=230, outline=0, width=4)
     d.text((128, 50), "4", font=font(56), fill=0, anchor="mm")
     d.text((128, 108), "CHANNEL 4", font=font(18), fill=230, anchor="mm")
     y = 136
     for text, size, shade in lines:
-        while font(size).getlength(text) > W - 16 and size > 9:
+        while font(size).getlength(text) > BW - 16 and size > 9:
             size -= 1
         d.text((128, y), text, font=font(size), fill=shade, anchor="mm")
         y += size + 8
-    return img.tobytes()
+    return fit(img).tobytes()
 
 
 def test_pattern():
     """For tuning: grey steps, a circle with crosshairs, fine and coarse bars."""
-    img = Image.new("L", (W, H), 128)
+    img = Image.new("L", (BW, BH), 128)
     d = ImageDraw.Draw(img)
     for i in range(8):
         d.rectangle([i * 32, 0, i * 32 + 31, 30], fill=round(i * 255 / 7))
-    for x in range(0, W, 16):
-        d.line([x, 32, x, H - 32], fill=90)
-    for y in range(32, H - 31, 16):
-        d.line([0, y, W, y], fill=90)
+    for x in range(0, BW, 16):
+        d.line([x, 32, x, BH - 32], fill=90)
+    for y in range(32, BH - 31, 16):
+        d.line([0, y, BW, y], fill=90)
     d.ellipse([68, 36, 188, 156], fill=230, outline=0, width=4)
     d.line([128, 36, 128, 156], fill=0, width=2)
     d.line([68, 96, 188, 96], fill=0, width=2)
     d.text((128, 76), "CHANNEL 4", font=font(16), fill=0, anchor="mm")
     d.text((128, 118), "TEST PATTERN", font=font(12), fill=0, anchor="mm")
-    for i, step in enumerate((1, 2, 4)):  # resolution wedges, finest on the left
-        x0 = 8 + i * 84
-        for x in range(x0, x0 + 72, step * 2):
-            d.rectangle([x, H - 26, x + step - 1, H - 4], fill=0)
-            d.rectangle([x + step, H - 26, x + 2 * step - 1, H - 4], fill=255)
+    img = fit(img)
+    d = ImageDraw.Draw(img)
+    sx, sy = W / BW, H / BH
+    for i, step in enumerate((1, 2, 4)):  # resolution wedges, finest on the left, at the board's own pixels
+        x0, y0, y1 = round((8 + i * 84) * sx), H - round(26 * sy), H - round(4 * sy)
+        for x in range(x0, x0 + round(72 * sx), step * 2):
+            d.rectangle([x, y0, x + step - 1, y1], fill=0)
+            d.rectangle([x + step, y0, x + 2 * step - 1, y1], fill=255)
     return img.tobytes()
 
 
@@ -188,12 +197,12 @@ def leaf_points():
 
 def flag_card():
     """The flag in grey: white field, dark bars and leaf, "O CANADA" under it."""
-    img = Image.new("L", (W, H), 20)
+    img = Image.new("L", (BW, BH), 20)  # ffmpeg scales it to the board's size
     d = ImageDraw.Draw(img)
     top, fh = 22, 128  # a 2:1 flag, 256 x 128
-    d.rectangle([0, top, W - 1, top + fh - 1], fill=235)
+    d.rectangle([0, top, BW - 1, top + fh - 1], fill=235)
     d.rectangle([0, top, 63, top + fh - 1], fill=70)
-    d.rectangle([192, top, W - 1, top + fh - 1], fill=70)
+    d.rectangle([192, top, BW - 1, top + fh - 1], fill=70)
     pts = leaf_points()
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     scale = (fh * 0.8) / (max(ys) - min(ys))
@@ -820,7 +829,7 @@ class Station:
                 "coming": [r for r in self.guide(hours=2) if not r.get("on_now")][:6],
                 "disk": {"free_mb": disk.free // 10**6, "total_mb": disk.total // 10**6},
                 "link": {**link, "connected": self.tv.sock is not None}, "board": self.tv.board,
-                "schedule": self.schedule(), "off_air": self.off_air(datetime.now()),
+                "schedule": self.schedule(), "off_air": self.off_air(datetime.now()), "size": f"{W}x{H}",
                 "queue": [show(q) for q in self.queue],
                 "pos": round(self.pos), "length": round(self.length), "settings": self.settings,
                 "lineup": {**self.lineup, **lineup}, "fetching": sorted(self.fetching), "bulk": self.bulk,

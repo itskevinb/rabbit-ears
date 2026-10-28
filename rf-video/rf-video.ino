@@ -89,7 +89,14 @@ const float SLOTS_PER_US = BIT_RATE / 2 / 1e6f;
 const float HSYNC_US = 4.7, BACK_PORCH_US = 4.7, FRONT_PORCH_US = 1.5, SAFE = 0.90;
 const int SYNC = 256, BLACK = 192, WHITE = 32;  // carrier strength, 256 = every pulse
 
-const int VID_W = 256, VID_H = 192, VID_BYTES = VID_W * VID_H / 2;
+#if CONFIG_IDF_TARGET_ESP32S3
+// One picture row per visible line (216 of the 240 active ones show, SAFE), and
+// square pixels: 288 wide is 2-3 slots a pixel. The station must send this size
+// (CHANNEL4_SIZE=288x216); #status reports it.
+const int VID_W = 288, VID_H = 216, VID_BYTES = VID_W * VID_H / 2;
+#else
+const int VID_W = 256, VID_H = 192, VID_BYTES = VID_W * VID_H / 2;  // heap: 3 of these is all that fits
+#endif
 const int AUD_MAX = 800;  // audio samples per packet (24 fps needs 651; USB's ~3 fps would need 5208, so USB is for commands now)
 #if CONFIG_IDF_TARGET_ESP32S3
 const int NQ = 8;  // in PSRAM: a third of a second of slack against Wi-Fi hiccups
@@ -206,7 +213,9 @@ void build_tables() {
   sigma_delta(vsync_src, pal, vsync_line);
   for (int l = 0; l < LINES; l++) {
     float v = ((float)(l - FIRST_ACTIVE) / (LAST_ACTIVE + 1 - FIRST_ACTIVE) - 0.5f) / SAFE + 0.5f;
-    row_of_line[l] = (l >= FIRST_ACTIVE && l <= LAST_ACTIVE && v >= 0 && v < 1) ? (int)(v * VID_H) : -1;
+    // + a hair before flooring: at one row per line, float error in v put many
+    // lines a row short (216 rows showed as 187, 29 doubled)
+    row_of_line[l] = (l >= FIRST_ACTIVE && l <= LAST_ACTIVE && v >= 0 && v < 1) ? min(VID_H - 1, (int)(v * VID_H + 1e-3f)) : -1;
   }
   int first = 0;
   while (slot_src[first] >= VID_W) first++;
@@ -553,9 +562,9 @@ const char *reset_name() {
 
 template <typename Link> void send_status(Link &out) {
   char msg[160];
-  snprintf(msg, sizeof(msg), "#status up %lu reset %s heap %u minheap %u rssi %d load %u/%u/%u joins %u\n",
+  snprintf(msg, sizeof(msg), "#status up %lu reset %s heap %u minheap %u rssi %d load %u/%u/%u joins %u size %dx%d\n",
            (unsigned long)(millis() / 1000), reset_name(), ESP.getFreeHeap(), ESP.getMinFreeHeap(), WiFi.RSSI(),
-           pic_pct, sound_pct, inflate_pct, wifi_joins);
+           pic_pct, sound_pct, inflate_pct, wifi_joins, VID_W, VID_H);
   out.print(msg);
 }
 
