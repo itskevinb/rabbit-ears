@@ -48,6 +48,10 @@ SEASONS = {"halloween": ((10, 1), (10, 31)), "christmas": ((12, 1), (12, 26))}
 # Columbia Mixed Quartette, recorded 24 May 1913 (Columbia A1369): public domain.
 ANTHEM = {"title": "O Canada", "year": 1913, "item": "OCanada_284", "file": "OCanada.mp3"}
 IDENT, UP_NEXT = 4, 5  # seconds: "we'll be right back" before commercials, "up next" before a show
+# The board takes at most 800 audio samples a packet (AUD_MAX), so at 15625 Hz
+# nothing may go out under 20 fps: a 15 fps show sent as-is had every packet
+# thrown away (frozen picture, no sound).
+MIN_FPS = 20
 
 
 def ulaw_decode(u):  # G.711, +/-32124
@@ -555,11 +559,13 @@ class Station:
         show's own rate doesn't. The fps setting stays the ceiling (60 fps halves to 30)."""
         cap = self.settings["fps"]
         own = self.source_fps(show) if self.settings["match_fps"] else None
-        if not own or own < 8:
+        if not own:
             return cap
+        if own < MIN_FPS:  # 12 fps goes as 24 (each frame twice); 15 as the cap
+            own = next((own * k for k in (2, 3) if MIN_FPS <= own * k <= cap), cap)
         if own <= cap:
             return own
-        if own % 2 == 0 and 20 <= own // 2 <= cap:
+        if own % 2 == 0 and MIN_FPS <= own // 2 <= cap:
             return own // 2
         return cap
 
@@ -856,7 +862,7 @@ class Station:
 
     def set_settings(self, new):
         s = {**self.settings}
-        s["fps"] = max(8, min(30, int(new.get("fps", s["fps"]))))
+        s["fps"] = max(MIN_FPS, min(30, int(new.get("fps", s["fps"]))))
         s["match_fps"] = bool(new.get("match_fps", s["match_fps"]))
         s["smooth"] = bool(new.get("smooth", s["smooth"]))
         s["sound"] = new.get("sound", s["sound"]) if new.get("sound") in SOUND_METHODS else s["sound"]
