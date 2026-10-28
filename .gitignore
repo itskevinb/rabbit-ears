@@ -4,3 +4,4 @@ cache/
 deploy/host
 __pycache__/
 deploy/fqbn
+CLAUDE.local.md
