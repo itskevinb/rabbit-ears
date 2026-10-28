@@ -479,6 +479,36 @@ template <typename Link> void throughput_test(Link &in) {
 }
 
 
+// Status for the station (command S), one line back on the same link: how
+// long since boot and why it last reset (a crash or brownout vs a Wi-Fi drop),
+// memory, signal, the generators' load and how often Wi-Fi has (re)joined.
+volatile uint32_t pic_pct, sound_pct, inflate_pct, wifi_joins;
+
+const char *reset_name() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_EXT: return "reset-pin";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "crash";
+    case ESP_RST_INT_WDT: return "interrupt-watchdog";
+    case ESP_RST_TASK_WDT: return "task-watchdog";
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_SDIO: return "sdio";
+    default: return "unknown";
+  }
+}
+
+template <typename Link> void send_status(Link &out) {
+  char msg[160];
+  snprintf(msg, sizeof(msg), "#status up %lu reset %s heap %u minheap %u rssi %d load %u/%u/%u joins %u\n",
+           (unsigned long)(millis() / 1000), reset_name(), ESP.getFreeHeap(), ESP.getMinFreeHeap(), WiFi.RSSI(),
+           pic_pct, sound_pct, inflate_pct, wifi_joins);
+  out.print(msg);
+}
+
+
 // Bulk read with a 1 s timeout. Stream::readBytes goes a byte at a time, which
 // held Wi-Fi to ~20 fps at 256x192.
 template <typename Link> bool read_full(Link &in, uint8_t *buf, size_t n) {
@@ -507,6 +537,7 @@ template <typename Link> void receive(Link &in, int &matched) {
         if (c >= 'W' && c <= 'Y') sound_mode = 2 + (c - 'W');
         if (c == 'D' || c == 'd') line_dither = c == 'D';
         if (c == 'T') throughput_test(in);
+        if (c == 'S') send_status(in);
         matched = 0;
       } else if (matched == 2 && c == 'C') matched = 5;
       else if (matched == 2 && c == 'V') matched = 3;
@@ -561,9 +592,12 @@ template <typename Link> void receive(Link &in, int &matched) {
 // Wi-Fi side, on core 0 next to the network stack: core 1 is mostly busy
 // building the picture, and receiving from there capped the stream at ~20 fps.
 void network_task(void *) {
-  bool serving = false;
+  bool serving = false, joined = false;
   int matched = 0;
   for (;;) {
+    bool up = WiFi.status() == WL_CONNECTED;
+    if (up && !joined) wifi_joins++;
+    joined = up;
     if (!serving && WiFi.status() == WL_CONNECTED) {
       MDNS.begin("tubetv");
       MDNS.addService("tubetv", "tcp", 5000);
@@ -593,6 +627,7 @@ void loop() {
   }
   if (millis() - last >= 5000) {
     uint32_t span = (millis() - last) * 10;  // percent of the span, in us/100
+    pic_pct = pic_busy_us / span, sound_pct = sound_busy_us / span, inflate_pct = inflate_us / span;
     Serial.printf("#load picture %u%% sound %u%% inflate %u%% heap %u wifi %s\n", pic_busy_us / span,
                   sound_busy_us / span, inflate_us / span, ESP.getFreeHeap(), WiFi.localIP().toString().c_str());
     pic_busy_us = sound_busy_us = inflate_us = 0;

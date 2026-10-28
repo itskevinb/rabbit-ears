@@ -5,7 +5,7 @@ packet of one 256x192 4-bit picture (V3 zlib-compressed) plus that frame's
 share of the mu-law audio at 15625 Hz (one sample per TV line). See
 rf-video/rf-video.ino for the board side.
 """
-import socket, struct, subprocess, time, zlib
+import select, socket, struct, subprocess, time, zlib
 
 W, H, RATE, PORT = 256, 192, 15625, 5000
 SOUND_METHODS = {"w4": "Y", "w2": "X", "w1": "W", "old": "O", "six": "N"}  # see rf-video.ino
@@ -135,17 +135,22 @@ class TV:
     """The Wi-Fi link. TCP flow control paces us (the board stops reading when
     its queue is full); a small send buffer keeps us only a few frames ahead,
     so skips and the 'now playing' thumbnail stay close to what's on screen.
-    Reconnects on its own and resends the settings commands."""
+    Reconnects on its own and resends the settings commands. Keeps count of
+    drops, and the board's own "#status" lines (firmware that answers command S)."""
 
     def __init__(self, host="tubetv.local", setup=b""):
         self.host, self.setup, self.sock = host, setup, None
+        self.stats = {"connects": 0, "drops": 0, "since": None, "last_drop": None, "last_error": None}
+        self.board, self.inbox = None, b""
 
     def _connect(self):
         s = socket.create_connection((self.host, PORT), timeout=10)
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32768)
         s.sendall(self.setup)
-        self.sock = s
+        self.sock, self.inbox = s, b""
+        self.stats["connects"] += 1
+        self.stats["since"] = time.time()
 
     def send(self, data):
         while True:
@@ -153,11 +158,36 @@ class TV:
                 if self.sock is None:
                     self._connect()
                 self.sock.sendall(data)
+                self._read()
                 return
             except OSError as e:
                 print(f"tv link: {e}; retrying", flush=True)
+                self.stats.update(drops=self.stats["drops"] + 1, last_drop=time.time(), last_error=str(e), since=None)
                 self.close()
                 time.sleep(3)
+
+    def _read(self):
+        """Pick up whatever the board sent back, without waiting (select first:
+        recv on a socket with a timeout would block until data comes)."""
+        while select.select([self.sock], [], [], 0)[0]:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise ConnectionResetError("board closed the connection")
+            self.inbox += chunk
+        *lines, self.inbox = self.inbox.split(b"\n")
+        self.inbox = self.inbox[-512:]  # junk without newlines can't pile up
+        for line in lines:
+            words = line.decode("ascii", "replace").split()
+            if words[:1] != ["#status"]:
+                continue
+            status = {"at": time.time()}
+            for key, value in zip(words[1::2], words[2::2]):
+                status[key] = int(value) if value.lstrip("-").isdigit() else value
+            if isinstance(status.get("load"), str):  # picture/sound/inflate, % of a core
+                status["load"] = [int(v) for v in status["load"].split("/") if v.isdigit()]
+            if self.board and status.get("up", 0) < self.board.get("up", 0):
+                print(f"board restarted: reset {status.get('reset')}, up {status.get('up')} s", flush=True)
+            self.board = status
 
     def configure(self, setup):
         """New settings commands: sent now and again after any reconnect."""

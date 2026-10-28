@@ -22,11 +22,11 @@ archive.org search), Downloads (what's cached, space left) and Settings
 Runs 24/7 as a systemd service on any small Linux box: see deploy/.
 """
 import io, json, os, random, re, shutil, subprocess, sys, threading, time, urllib.parse, urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-from tvlink import CLEANUP, H, RATE, SILENCE, SOUND_METHODS, W, Source, TV, audio_share, packet, setup_commands
+from tvlink import CLEANUP, H, RATE, SILENCE, SOUND_METHODS, W, Source, TV, audio_share, cmd, packet, setup_commands
 
 HERE = Path(__file__).resolve().parent
 CACHE = Path(os.environ.get("CHANNEL4_CACHE", HERE.parent / "cache"))
@@ -35,6 +35,19 @@ flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] i
 
 DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False,
                     "volume": 100, "cleanup": "strong", "smooth": True, "match_fps": True}
+
+# The broadcast day, kept in lineup.json next to the late-night hours.
+DEFAULT_SCHEDULE = {"cartoon_mornings": True, "mornings_from": 7, "mornings_to": 12,  # weekend mornings: cartoons only
+                    "features_from": 12,                                 # daytime features wait for the afternoon
+                    "off_air": True, "sign_off": 1, "sign_on": 6,        # O Canada, then the test pattern overnight
+                    "breaks": "light"}                                   # commercials between shows
+BREAKS = {"off": 0, "light": 1, "classic": 2}
+KINDS = ("cartoon", "short", "feature")
+GUESS = {"cartoon": 420, "short": 1020, "feature": 4800, "bumper": 60}  # seconds, until a show is downloaded
+SEASONS = {"halloween": ((10, 1), (10, 31)), "christmas": ((12, 1), (12, 26))}
+# Columbia Mixed Quartette, recorded 24 May 1913 (Columbia A1369): public domain.
+ANTHEM = {"title": "O Canada", "year": 1913, "item": "OCanada_284", "file": "OCanada.mp3"}
+IDENT, UP_NEXT = 4, 5  # seconds: "we'll be right back" before commercials, "up next" before a show
 
 
 def ulaw_decode(u):  # G.711, +/-32124
@@ -73,6 +86,15 @@ def save(name, data):
 
 def slug(show):
     return "".join(c if c.isalnum() else "-" for c in show["title"].lower()).strip("-")
+
+
+def in_season(show, when):
+    """A Halloween or Christmas show plays only in its season; the rest always."""
+    season = SEASONS.get(show.get("season") or "")
+    if not season:
+        return True
+    start, end = season
+    return start <= (when.month, when.day) <= end
 
 
 def font(size):
@@ -127,6 +149,53 @@ def test_pattern():
     return img.tobytes()
 
 
+# The maple leaf from the flag's construction sheet (Wikimedia's SVG path, in
+# 1/2400ths of the flag's height); arcs are drawn as straight lines, which
+# nobody can tell at this size.
+LEAF = ("m-90 2030 45-863a95 95 0 0 0-111-98l-859 151 116-320a65 65 0 0 0-20-73l-941-762 212-99a65 65 0 0 0 34-79"
+        "l-186-572 542 115a65 65 0 0 0 73-38l105-247 423 454a65 65 0 0 0 111-57l-204-1052 327 189a65 65 0 0 0 91-27"
+        "l332-652 332 652a65 65 0 0 0 91 27l327-189-204 1052a65 65 0 0 0 111 57l423-454 105 247a65 65 0 0 0 73 38"
+        "l542-115-186 572a65 65 0 0 0 34 79l212 99-941 762a65 65 0 0 0-20 73l116 320-859-151a95 95 0 0 0-111 98l45 863z")
+
+
+def leaf_points():
+    tokens = re.findall(r"[mlaz]|-?\d+(?:\.\d+)?", LEAF)
+    x = y = 0.0
+    pts, i, cmd = [], 0, None
+    while i < len(tokens):
+        if tokens[i] in "mlaz":
+            cmd = tokens[i]
+            i += 1
+            if cmd == "z":
+                continue
+        if cmd == "a":  # rx ry rotation large sweep dx dy: keep the end point
+            x, y = x + float(tokens[i + 5]), y + float(tokens[i + 6])
+            i += 7
+        else:
+            x, y = x + float(tokens[i]), y + float(tokens[i + 1])
+            i += 2
+            cmd = "l" if cmd == "m" else cmd
+        pts.append((x, y))
+    return pts
+
+
+def flag_card():
+    """The flag in grey: white field, dark bars and leaf, "O CANADA" under it."""
+    img = Image.new("L", (W, H), 20)
+    d = ImageDraw.Draw(img)
+    top, fh = 22, 128  # a 2:1 flag, 256 x 128
+    d.rectangle([0, top, W - 1, top + fh - 1], fill=235)
+    d.rectangle([0, top, 63, top + fh - 1], fill=70)
+    d.rectangle([192, top, W - 1, top + fh - 1], fill=70)
+    pts = leaf_points()
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    scale = (fh * 0.8) / (max(ys) - min(ys))
+    cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+    d.polygon([(128 + (px - cx) * scale, top + fh / 2 + (py - cy) * scale) for px, py in pts], fill=70)
+    d.text((128, top + fh + 22), "O CANADA", font=font(18), fill=230, anchor="mm")
+    return img
+
+
 # ---- archive.org ---------------------------------------------------------------
 
 def archive_json(url):
@@ -178,35 +247,190 @@ class Station:
         self.framing = load("framing.json", {})  # slug -> {"crop", "fill"}: black bars to cut, zoom to fill
         self.resume = load("now.json", None)  # {"show", "pos"}: a restart picks the show up where it was
         self.bulk = None                      # progress of a "download all"
-        self.bags = {}                   # block -> shuffled shows not played yet
+        self.bags = {}                   # pool -> shuffled shows not played yet
+        self.plan = []                   # what comes after the queue: {"type": show|signoff|signon, "show", "at"}
         self.changed = threading.Event()
+        self.flag = CACHE / "flag.png"
+        flag_card().save(self.flag)
+        self.last_ask = 0.0              # when we last asked the board how it's doing
+        self.signed_off = 0.0            # when the last sign-off ran (one O Canada a night)
 
     def setup(self):
         return setup_commands(self.settings["sound"], self.settings["dither"])
 
-    # -- lineup ---------------------------------------------------------------
-    def block(self):
-        hour = datetime.now().hour
+    # -- the schedule -------------------------------------------------------------
+    # The station plans a few hours ahead (the TV guide shows the plan): each
+    # show is drawn for the time it will start, so the block and the daytime
+    # rules apply then, not now. Commercials are picked as they come up.
+    def schedule(self):
+        return {**DEFAULT_SCHEDULE, **self.lineup.get("schedule", {})}
+
+    def block(self, when=None):
+        hour = (when or datetime.now()).hour
         night = hour >= self.lineup["night_starts"] or hour < self.lineup["night_ends"]
         return "night" if night else "day"
 
-    def pick(self, avoid=None):
-        """Next show from the current block: a shuffled pass through the list,
-        never the same show twice in a row."""
-        block = self.block()
-        shows = self.lineup.get(block) or self.lineup.get("day") or self.lineup.get("night")
+    def off_air(self, when):
+        sc = self.schedule()
+        if not sc["off_air"] or sc["sign_off"] == sc["sign_on"]:
+            return False
+        hour, a, b = when.hour, sc["sign_off"], sc["sign_on"]
+        return a <= hour < b if a < b else hour >= a or hour < b
+
+    def sign_on_time(self, when):
+        on = when.replace(hour=self.schedule()["sign_on"], minute=0, second=0, microsecond=0)
+        return on if on > when else on + timedelta(days=1)
+
+    def kind(self, show):
+        if show.get("kind") in KINDS:
+            return show["kind"]
+        if self.durations.get(slug(show), 0) > 2400:
+            return "feature"
+        return "short" if "stooges" in show["title"].lower() else "cartoon"
+
+    def length_of(self, show):
+        return self.durations.get(slug(show)) or GUESS[self.kind(show)]
+
+    def fits(self, show, when):
+        """May this show start then? Its season, and by day: no features before
+        features_from, and only cartoons on weekend mornings."""
+        if not in_season(show, when):
+            return False
+        if self.block(when) == "night":
+            return True
+        sc, kind = self.schedule(), self.kind(show)
+        if kind == "feature" and when.hour < sc["features_from"]:
+            return False
+        if sc["cartoon_mornings"] and when.weekday() >= 5 and sc["mornings_from"] <= when.hour < sc["mornings_to"]:
+            return kind == "cartoon"
+        return True
+
+    def draw(self, pool, when, avoid=None, rules=True):
+        """The next show in a pool's shuffle that may start at `when`, never the
+        same one twice running. Shows that don't fit yet stay in the shuffle for
+        later; a seasonal show goes in twice while it's in season."""
+        shows = self.lineup.get(pool) or []
         if not shows:
             return None
-        bag = [s for s in self.bags.get(block, []) if s in shows]
-        if not bag:
-            bag = shows[:]
-            random.shuffle(bag)
-        for i, show in enumerate(bag):
-            if avoid is None or slug(show) != slug(avoid) or len(shows) == 1:
-                bag.pop(i)
-                self.bags[block] = bag
-                return show
-        return bag[0]
+        ok = (lambda s: self.fits(s, when)) if rules else (lambda s: in_season(s, when))
+        bag = self.bags.setdefault(pool, [])
+        bag[:] = [s for s in bag if s in shows]
+        for refill in (False, True):
+            if refill:
+                fresh = [s for s in shows for _ in range(2 if s.get("season") and in_season(s, when) else 1)]
+                random.shuffle(fresh)
+                bag[:] = fresh if len(bag) > 2 * len(shows) else bag + fresh
+            for i, show in enumerate(bag):
+                if ok(show) and (avoid is None or slug(show) != slug(avoid) or len(shows) == 1):
+                    return bag.pop(i)
+        return random.choice([s for s in shows if in_season(s, when)] or shows)
+
+    def break_length(self):
+        n = BREAKS.get(self.schedule()["breaks"], 0)
+        return IDENT + n * GUESS["bumper"] if n and self.lineup.get("bumpers") else 0
+
+    def item_length(self, item):
+        if item["type"] == "show":
+            return self.length_of(item["show"])
+        anthem = self.durations.get(slug(ANTHEM), 190)
+        return anthem + (8 if item["type"] == "signoff" else 6)
+
+    def extend_plan(self, hours=3):
+        """Plan until `hours` from now. Call with the lock held."""
+        now = datetime.now()
+        gap = self.break_length() + UP_NEXT
+        if self.plan:
+            last = self.plan[-1]
+            t = last["at"] + timedelta(seconds=self.item_length(last) + (gap if last["type"] == "show" else UP_NEXT))
+        else:
+            t = now + timedelta(seconds=(max(0, self.length - self.pos) + gap if self.now else 0))
+        while t < now + timedelta(hours=hours) and len(self.plan) < 300:
+            if self.off_air(t):
+                self.plan.append({"type": "signoff", "at": t})
+                t = self.sign_on_time(t)
+                self.plan.append({"type": "signon", "at": t})
+                t += timedelta(seconds=self.item_length(self.plan[-1]) + UP_NEXT)
+                continue
+            last = next((i["show"] for i in reversed(self.plan) if i["type"] == "show"), self.now)
+            pool = self.block(t) if self.lineup.get(self.block(t)) else "day"
+            show = self.draw(pool, t, avoid=last)
+            if show is None:
+                break
+            self.plan.append({"type": "show", "show": show, "at": t})
+            t += timedelta(seconds=self.length_of(show) + gap)
+
+    def replan(self):
+        """Start the plan over (it drifted, or the hours changed). Planned shows go
+        back to the front of their shuffles, so none are lost. Lock held."""
+        for item in reversed(self.plan):
+            if item["type"] == "show":
+                pool = next((p for p in ("day", "night") if item["show"] in self.lineup.get(p, [])), None)
+                if pool:
+                    self.bags.setdefault(pool, []).insert(0, item["show"])
+        self.plan = []
+
+    def stale(self, item, now):
+        """A planned item that no longer belongs here: a show more than 15 minutes
+        off its time or due while off the air, or a sign-off before its hour."""
+        if item["type"] == "show":
+            return abs((now - item["at"]).total_seconds()) > 900 or self.off_air(now)
+        if item["type"] == "signoff":
+            return not self.off_air(now)
+        return False
+
+    def next_item(self):
+        with self.lock:
+            now = datetime.now()
+            if self.plan and self.stale(self.plan[0], now):
+                self.replan()
+            if not self.plan:
+                self.extend_plan()
+            item = self.plan.pop(0) if self.plan else None
+            self.extend_plan()
+            return item
+
+    def peek(self):
+        """The next show: the queue's first, else the plan's."""
+        with self.lock:
+            if self.queue:
+                return self.queue[0]
+            self.extend_plan()
+            return next((i["show"] for i in self.plan if i["type"] == "show"), None)
+
+    def guide(self, hours=12):
+        """What's on from now, with estimated start times: the current show, the
+        queue, then the plan. The sign-on keeps its own time."""
+        with self.lock:
+            self.extend_plan(hours)
+            plan, queue = list(self.plan), list(self.queue)
+        now = datetime.now()
+        gap = self.break_length() + UP_NEXT
+        rows = []
+
+        def row(kind, show, start, length, **extra):
+            out = {"type": kind, "start": start.timestamp(), "time": start.strftime("%H:%M"), "length": round(length)}
+            if show:
+                out.update(title=show["title"], year=show.get("year", ""), slug=slug(show), kind=self.kind(show),
+                           season=show.get("season", ""), cached=self.path(show).exists())
+            rows.append({**out, **extra})
+
+        t = now
+        if self.now and not self.now.get("special") and self.mode == "lineup":
+            row("show", self.now, now - timedelta(seconds=self.pos), self.length or self.length_of(self.now), on_now=True)
+            t = now + timedelta(seconds=max(0, self.length - self.pos) + gap)
+        for show in queue:
+            row("show", show, t, self.length_of(show), queued=True)
+            t += timedelta(seconds=self.length_of(show) + gap)
+        for item in plan:
+            if t > now + timedelta(hours=hours):
+                break
+            if item["type"] == "signon":
+                t = max(t, item["at"])
+            row(item["type"], item.get("show"), t, self.item_length(item),
+                **({"title": "Sign-off: O Canada"} if item["type"] == "signoff" else
+                   {"title": "Sign-on: O Canada"} if item["type"] == "signon" else {}))
+            t += timedelta(seconds=self.item_length(item) + (gap if item["type"] == "show" else UP_NEXT))
+        return rows
 
     def path(self, show):
         return CACHE / f"{slug(show)}.mp4"
@@ -241,10 +465,11 @@ class Station:
         for attempt, wait in enumerate((0, 5, 20)):  # archive.org throws the odd 5XX
             time.sleep(wait)
             print(f"fetching {show['title']}" + (f" (try {attempt + 1})" if attempt else ""), flush=True)
+            audio_only = show["file"].lower().endswith((".mp3", ".ogg", ".flac", ".wav", ".m4a"))
+            shrink = ["-vn"] if audio_only else ["-vf", "scale=320:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26"]
             r = subprocess.run(["nice", "-n", "19", "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
                                 "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
-                                "-i", url, "-vf", "scale=320:-2", "-ac", "1", "-c:v", "libx264", "-preset", "veryfast",
-                                "-crf", "26", "-c:a", "aac", str(tmp)])
+                                "-i", url, *shrink, "-ac", "1", "-c:a", "aac", str(tmp)])
             if r.returncode == 0:
                 break
             tmp.unlink(missing_ok=True)
@@ -339,8 +564,10 @@ class Station:
         return cap
 
     def frame_up_all(self):
-        """Measure the shows cached before framing existed, in the background."""
-        for show in self.lineup["day"] + self.lineup["night"]:
+        """Measure the shows cached before framing existed, in the background,
+        and fetch the anthem if it isn't here yet."""
+        self.fetch(ANTHEM)
+        for show in self.lineup["day"] + self.lineup["night"] + self.lineup.get("bumpers", []):
             try:
                 with self.encoder:  # CPU-bound like a download: one at a time
                     self.frame_up(show)
@@ -356,6 +583,9 @@ class Station:
         if self.pending_setup:  # settings go down the same connection, from this thread
             self.pending_setup = False
             self.tv.send(self.tv.setup)
+        if time.time() - self.last_ask > 30:  # firmware that knows S answers with a #status line
+            self.last_ask = time.time()
+            self.tv.send(cmd("S"))
         if self.settings["muted"]:  # silence, not no carrier: the set stays quiet instead of buzzing
             mulaw = bytes([SILENCE]) * len(mulaw)
         elif self.settings["volume"] < 100:
@@ -371,7 +601,7 @@ class Station:
             self.send(gray, bytes([SILENCE]) * audio_share(n, fps))
             n += 1
 
-    def play(self, show, path, start=0.0):
+    def play(self, show, path, start=0.0, resumable=True):
         self.length = self.duration(show)
         while True:
             s = self.settings
@@ -386,7 +616,7 @@ class Station:
                     self.send(gray, mulaw)
                     n += 1
                     self.pos = start + n / fps
-                    if n % (5 * fps) == 0:
+                    if resumable and n % (5 * fps) == 0:
                         save("now.json", {"show": show, "pos": self.pos})
                     if self.reopen:  # picture settings changed: pick up where we are
                         break
@@ -399,8 +629,85 @@ class Station:
             self.reopen = False
             start = self.pos
 
+    def segment(self, part):
+        """One part of a break, sign-off or sign-on: skip ends just that part;
+        "play now" or a mode change ends the whole thing."""
+        try:
+            part()
+        except Interrupted:
+            pass
+        if self.override is not None or self.mode != "lineup":
+            raise Interrupted
+        self.skip = False
+
+    def commercial_break(self):
+        """'We'll be right back', then one or two commercials from the bumpers
+        list. One that isn't downloaded yet is fetched for next time."""
+        n = BREAKS.get(self.schedule()["breaks"], 0)
+        ads = []
+        for _ in range(n if self.lineup.get("bumpers") else 0):
+            ad = self.draw("bumpers", datetime.now(), avoid=ads[-1] if ads else None, rules=False)
+            if ad and self.path(ad).exists():
+                ads.append(ad)
+            elif ad:
+                threading.Thread(target=self.fetch, args=(ad,), daemon=True).start()
+        if not ads:
+            return
+        self.now, self.pos, self.length = {"title": "Commercial break", "special": "break"}, 0, 0
+        self.segment(lambda: self.hold(channel_card(("WE'LL BE RIGHT BACK", 16, 230), ("after these messages", 12, 170)),
+                                       seconds=IDENT, until=self.interrupted))
+        for ad in ads:
+            self.now, self.pos = {**ad, "special": "commercial"}, 0
+            self.segment(lambda: self.play(ad, self.path(ad), resumable=False))
+
+    def anthem(self):
+        """O Canada over the flag, if it's downloaded (fetched for next time if not)."""
+        path = self.path(ANTHEM)
+        if not path.exists():
+            threading.Thread(target=self.fetch, args=(ANTHEM,), daemon=True).start()
+            return
+        s, fps = self.settings, self.settings["fps"]
+        self.length, self.pos = self.duration(ANTHEM), 0
+        source = Source(["-loop", "1", "-framerate", str(fps), "-i", str(self.flag)], ["-i", str(path)], fps=fps,
+                        duration=self.length, cleanup=s["cleanup"], smooth=s["smooth"])
+        try:
+            for n, (gray, mulaw) in enumerate(source, 1):
+                self.send(gray, mulaw)
+                self.pos = n / fps
+                if self.interrupted():
+                    raise Interrupted
+        finally:
+            source.close()
+
+    def sign_off(self):
+        """End of the broadcast day: a card, O Canada, then the test pattern (no
+        tone) until sign-on, or until off_air is turned off. After a "play now"
+        in the night it goes straight back to the test pattern."""
+        if time.time() - self.signed_off > 6 * 3600:
+            print(f"{datetime.now():%H:%M} sign-off", flush=True)
+            self.signed_off = time.time()
+            self.now, self.pos, self.length = {"title": "Sign-off", "special": "signoff"}, 0, 0
+            self.segment(lambda: self.hold(channel_card(("THIS CONCLUDES", 16, 230), ("OUR BROADCAST DAY", 16, 230)),
+                                           seconds=8, until=self.interrupted))
+            self.segment(self.anthem)
+        on = self.sign_on_time(datetime.now())
+        self.now, self.pos, self.length = {"title": f"Off the air until {on:%-I %p}", "special": "offair"}, 0, 0
+        self.hold(test_pattern(), until=lambda: datetime.now() >= on or not self.off_air(datetime.now())
+                  or self.override is not None or self.mode != "lineup")
+        if self.override is not None or self.mode != "lineup":
+            raise Interrupted
+
+    def sign_on(self):
+        print(f"{datetime.now():%H:%M} sign-on", flush=True)
+        self.signed_off = 0.0
+        self.now, self.pos, self.length = {"title": "Sign-on", "special": "signon"}, 0, 0
+        self.segment(self.anthem)
+        self.now = {"title": "Sign-on", "special": "signon"}
+        self.segment(lambda: self.hold(channel_card(("GOOD MORNING", 20, 230), ("Channel 4 is on the air", 13, 170)),
+                                       seconds=6, until=self.interrupted))
+
     def run(self):
-        current = None
+        played = False  # a show just ended: a commercial break comes before the next
         while True:
             try:
                 if self.mode == "standby":
@@ -421,25 +728,34 @@ class Station:
                         self.changed.wait(1)
                     continue
                 with self.lock:
-                    if self.override is not None:
-                        current, self.override = self.override, None
+                    current, self.override = self.override, None
                     self.skip = False
+                    if current is None and self.queue:
+                        current = self.queue.pop(0)
+                        save("queue.json", self.queue)
                 start_at = 0.0
                 if current is None and self.resume and self.mode == "lineup":
                     current, start_at, self.resume = self.resume["show"], float(self.resume["pos"]), None
                 if current is None:
-                    with self.lock:
-                        if self.queue:
-                            current = self.queue.pop(0)
-                            save("queue.json", self.queue)
-                current = current or self.pick()
-                if current is None:
-                    self.hold(channel_card(("NO SHOWS IN THE LINEUP", 14, 230)), seconds=5)
-                    continue
-                self.now, self.pos, self.length = current, start_at, self.duration(current)
-                self.upcoming = self.queue[0] if self.queue else self.pick(avoid=current)
+                    item = self.next_item()
+                    if item is None:
+                        self.hold(channel_card(("NO SHOWS IN THE LINEUP", 14, 230)), seconds=5)
+                        continue
+                    if item["type"] != "show":
+                        played = False
+                        if item["type"] == "signoff":
+                            self.sign_off()
+                        else:
+                            self.sign_on()
+                        continue
+                    current = item["show"]
+                self.upcoming = self.peek()
                 if self.upcoming:
                     threading.Thread(target=self.fetch, args=(self.upcoming,), daemon=True).start()
+                if played and not start_at:
+                    played = False
+                    self.commercial_break()
+                self.now, self.pos, self.length = current, start_at, self.duration(current)
                 if not self.path(current).exists():  # first time: stand by while it downloads
                     done = threading.Event()
                     threading.Thread(target=lambda: (self.fetch(current), done.set()), daemon=True).start()
@@ -451,7 +767,6 @@ class Station:
                 # waits (a slow retry once left the screen frozen for minutes).
                 path = self.path(current) if self.path(current).exists() else None
                 if path is None:  # couldn't get it: move on rather than hang
-                    current = None
                     continue
                 print(f"{datetime.now():%H:%M} now: {current['title']}" + (f" from {start_at:.0f} s" if start_at else ""),
                       flush=True)
@@ -462,15 +777,14 @@ class Station:
                         raise Interrupted
                 self.play(current, path, start_at)
                 save("now.json", None)
-                current = None if self.queue else self.upcoming  # the queue goes first
+                played = True
             except Interrupted:
-                # Skip goes to the show the page says is up next; "play now" and
-                # mode changes are picked up at the top of the loop.
-                skipping = self.skip and self.override is None and self.mode == "lineup" and not self.queue
-                current = self.upcoming if skipping else None
+                # Skip goes straight to what's next (the queue, then the plan), with
+                # no commercials; "play now" and mode changes are picked up at the top.
+                played = False
             except Exception as e:  # keep the station on the air whatever happens
                 print(f"station error: {e!r}", flush=True)
-                current = None
+                played = False
                 time.sleep(2)
 
     # -- remote -------------------------------------------------------------------
@@ -482,19 +796,24 @@ class Station:
             size = path.stat().st_size if path.exists() else 0
             return {**s, "slug": slug(s), "cached": bool(size), "mb": round(size / 1e6, 1),
                     "length": round(self.durations.get(slug(s), 0))}
-        lineup = {k: [show(s) for s in self.lineup.get(k, [])] for k in ("day", "night")}
-        upcoming = self.queue[0] if self.queue else self.upcoming
-        later = [s for s in self.bags.get(self.block(), []) if not upcoming or slug(s) != slug(upcoming)][:4]
+        lineup = {k: [{**show(s), "kind": self.kind(s), "kind_set": "kind" in s, "season": s.get("season", "")}
+                      for s in self.lineup.get(k, [])]
+                  for k in ("day", "night", "bumpers")}
+        upcoming = self.peek()
         disk = shutil.disk_usage(CACHE)
+        link = self.tv.stats
         return {"mode": self.mode, "block": self.block(), "now": show(self.now), "upcoming": show(upcoming),
-                "later": [show(s) for s in later], "disk": {"free_mb": disk.free // 10**6, "total_mb": disk.total // 10**6},
+                "coming": [r for r in self.guide(hours=2) if not r.get("on_now")][:6],
+                "disk": {"free_mb": disk.free // 10**6, "total_mb": disk.total // 10**6},
+                "link": {**link, "connected": self.tv.sock is not None}, "board": self.tv.board,
+                "schedule": self.schedule(), "off_air": self.off_air(datetime.now()),
                 "queue": [show(q) for q in self.queue],
                 "pos": round(self.pos), "length": round(self.length), "settings": self.settings,
                 "lineup": {**self.lineup, **lineup}, "fetching": sorted(self.fetching), "bulk": self.bulk,
                 "clock": datetime.now().strftime("%H:%M")}
 
     def find(self, key):
-        for s in self.lineup.get("day", []) + self.lineup.get("night", []):
+        for s in self.lineup.get("day", []) + self.lineup.get("night", []) + self.lineup.get("bumpers", []):
             if slug(s) == key:
                 return s
         return None
@@ -511,14 +830,28 @@ class Station:
         return show is not None
 
     def set_lineup(self, lineup):
-        clean = {"day": [], "night": [], "night_starts": int(lineup["night_starts"]) % 24,
-                 "night_ends": int(lineup["night_ends"]) % 24}
-        for block in ("day", "night"):
+        sc = self.schedule()
+        for k, v in (lineup.get("schedule") or {}).items():
+            if k in ("cartoon_mornings", "off_air"):
+                sc[k] = bool(v)
+            elif k == "breaks":
+                sc[k] = v if v in BREAKS else sc[k]
+            elif k in DEFAULT_SCHEDULE:
+                sc[k] = int(v) % 24
+        clean = {"day": [], "night": [], "bumpers": [], "night_starts": int(lineup["night_starts"]) % 24,
+                 "night_ends": int(lineup["night_ends"]) % 24, "schedule": sc}
+        for block in ("day", "night", "bumpers"):
             for s in lineup.get(block, []):
-                clean[block].append({"title": str(s["title"]), "year": s.get("year") or "",
-                                     "item": str(s["item"]), "file": str(s["file"])})
-        self.lineup = clean
-        self.bags = {}
+                show = {"title": str(s["title"]), "year": s.get("year") or "", "item": str(s["item"]), "file": str(s["file"])}
+                if s.get("kind") in KINDS:
+                    show["kind"] = s["kind"]
+                if s.get("season") in SEASONS:
+                    show["season"] = s["season"]
+                clean[block].append(show)
+        with self.lock:
+            self.lineup = clean
+            self.bags = {}
+            self.plan = []
         save("lineup.json", clean)
 
     def set_settings(self, new):
@@ -566,7 +899,8 @@ class Station:
         """Fetch every show not yet cached: the queue, or ("all") the queue and the whole lineup."""
         if self.bulk and self.bulk["running"]:
             return
-        shows = list(self.queue) + ([] if scope == "queue" else self.lineup["day"] + self.lineup["night"])
+        everything = self.lineup["day"] + self.lineup["night"] + self.lineup.get("bumpers", []) + [ANTHEM]
+        shows = list(self.queue) + ([] if scope == "queue" else everything)
         todo, seen = [], set()
         for show in shows:
             if slug(show) not in seen and not self.path(show).exists():
@@ -645,6 +979,8 @@ class Remote(BaseHTTPRequestHandler):
                 buf = io.BytesIO()
                 img.resize((W * 2, H * 2), Image.NEAREST).save(buf, "PNG")
                 return self.reply(200, buf.getvalue(), "image/png")
+            if url.path == "/api/guide":
+                return self.reply(200, station.guide(hours=min(24, int(q.get("hours", 12)))))
             if url.path == "/api/search":
                 return self.reply(200, archive_search(q.get("q", "")))
             if url.path == "/api/files":
