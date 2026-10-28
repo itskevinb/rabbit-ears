@@ -37,7 +37,7 @@ CLIPS = Path(os.environ.get("CHANNEL4_CLIPS") or CACHE)
 flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] if a.startswith("--")}
 
 DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False,
-                    "volume": 100, "cleanup": "strong", "smooth": True, "match_fps": True}
+                    "volume": 100, "cleanup": "strong", "smooth": True, "match_fps": True, "blend": True}
 
 # The broadcast day, kept in lineup.json next to the late-night hours.
 DEFAULT_SCHEDULE = {"cartoon_mornings": True, "mornings_from": 7, "mornings_to": 12,  # weekend mornings: cartoons only
@@ -629,10 +629,11 @@ class Station:
         while True:
             s = self.settings
             fps = self.show_fps(show)
+            own = self.source_fps(show)
             framing = self.framing.get(slug(show)) or {}
             source = Source.file(path, start, fps=fps, brightness=s["brightness"], contrast=s["contrast"],
                                  cleanup=s["cleanup"], crop=framing.get("crop"), fill=framing.get("fill", False),
-                                 smooth=s["smooth"])
+                                 smooth=s["smooth"], blend=s["blend"] and bool(own) and own > fps and own % fps != 0)
             n = 0
             try:
                 for gray, mulaw in source:
@@ -884,12 +885,13 @@ class Station:
         s["fps"] = max(MIN_FPS, min(30, int(new.get("fps", s["fps"]))))
         s["match_fps"] = bool(new.get("match_fps", s["match_fps"]))
         s["smooth"] = bool(new.get("smooth", s["smooth"]))
+        s["blend"] = bool(new.get("blend", s["blend"]))
         s["sound"] = new.get("sound", s["sound"]) if new.get("sound") in SOUND_METHODS else s["sound"]
         s["dither"] = bool(new.get("dither", s["dither"]))
         s["brightness"] = max(-0.5, min(0.5, float(new.get("brightness", s["brightness"]))))
         s["contrast"] = max(0.3, min(3.0, float(new.get("contrast", s["contrast"]))))
         s["cleanup"] = new.get("cleanup", s["cleanup"]) if new.get("cleanup") in CLEANUP else s["cleanup"]
-        picture = any(s[k] != self.settings[k] for k in ("fps", "match_fps", "smooth", "brightness", "contrast", "cleanup"))  # reopen the source
+        picture = any(s[k] != self.settings[k] for k in ("fps", "match_fps", "smooth", "blend", "brightness", "contrast", "cleanup"))  # reopen the source
         board = any(s[k] != self.settings[k] for k in ("sound", "dither"))
         self.settings = s
         save("settings.json", s)

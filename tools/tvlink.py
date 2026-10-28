@@ -65,16 +65,19 @@ def audio_share(frame_no, fps):
     return (frame_no + 1) * RATE // fps - frame_no * RATE // fps
 
 
-def video_filter(fps, brightness=0.0, contrast=1.0, crop=None, fill=False):
+def video_filter(fps, brightness=0.0, contrast=1.0, crop=None, fill=False, blend=False):
     # crop ("w:h:x:y") cuts black bars baked into the file; fill zooms a picture
     # that's nearly 4:3 to the whole screen (the set's overscan hides the edges)
     # instead of leaving thin bars. normalize stretches each scene to the full
     # grey range (old films are often tinted, which comes out murky), smoothed
-    # over ~3 s so it doesn't pump.
+    # over ~3 s so it doesn't pump. blend mixes neighbouring frames when the
+    # show is faster than the rate it's sent at (30 -> 24), instead of dropping
+    # every fifth frame, which judders on pans.
     eq = f"eq=brightness={brightness}:contrast={contrast}," if brightness or contrast != 1 else ""
     fit = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}," if fill
            else f"scale={W}:{H}:force_original_aspect_ratio=decrease,")
-    return (f"fps={fps}," + (f"crop={crop}," if crop else "") + fit +
+    rate = f"framerate=fps={fps}," if blend else f"fps={fps},"
+    return (rate + (f"crop={crop}," if crop else "") + fit +
             f"normalize=smoothing={3 * fps}:independence=0,{eq}"
             f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,format=gray")
 
@@ -102,12 +105,12 @@ class Source:
     """A clip decoded to frames: iterate for (grey frame, mu-law audio) pairs."""
 
     def __init__(self, inputs_video, inputs_audio, fps, brightness=0.0, contrast=1.0, duration=None, cleanup="strong",
-                 crop=None, fill=False, smooth=False):
+                 crop=None, fill=False, smooth=False, blend=False):
         limit = ["-t", str(duration)] if duration else []
         base = ["ffmpeg", "-nostdin", "-loglevel", "error"]
         self.fps, self.smooth = fps, smooth
         # stderr off: cutting a clip short (skip, play now) makes ffmpeg complain about the closed pipe
-        self.video = subprocess.Popen([*base, *inputs_video, *limit, "-vf", video_filter(fps, brightness, contrast, crop, fill),
+        self.video = subprocess.Popen([*base, *inputs_video, *limit, "-vf", video_filter(fps, brightness, contrast, crop, fill, blend),
                                        "-an", "-f", "rawvideo", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         # streamed alongside the video, so a feature film starts right away
         self.audio = subprocess.Popen([*base, *inputs_audio, *limit, "-vn", "-ac", "1", "-ar", str(RATE),

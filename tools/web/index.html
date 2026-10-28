@@ -257,11 +257,14 @@
           <select id="smooth"><option value="1">Smooth (dithered, recommended)</option><option value="0">Flat (16 steps)</option></select></div>
         <div><label for="matchFps">Frame rate per show</label>
           <select id="matchFps"><option value="1">Match each show (recommended)</option><option value="0">Always the highest</option></select></div>
+        <div><label for="blend">Faster shows</label>
+          <select id="blend"><option value="1">Blend frames (smoother pans)</option><option value="0">Drop frames (sharper, judders)</option></select></div>
       </div>
       <div class="buttons" style="margin-top:12px"><button class="primary" onclick="saveSettings()">Apply</button>
         <button onclick="resetSettings()">Back to defaults</button></div>
       <p class="note">Picture changes take effect within a second. Matching each show plays film at 24 fps and TV transfers at 30, so
-        nothing gets frames repeated or dropped (the stutter); the highest frame rate still caps it. Keep it at 24: at 30 the board
+        nothing gets frames repeated or dropped (the stutter); the highest frame rate still caps it. A 30 fps show sent at 24
+        blends neighbouring frames by default, so pans glide instead of jumping every fifth frame. Keep it at 24: at 30 the board
         falls behind (measured 88% of real time at 256x192), which comes out as sound gaps and frozen frames.</p>
     </section>
 
@@ -588,17 +591,18 @@ function loadSettings() {
   for (const k of sliders) { $(k).value = s[k]; $(k + 'V').textContent = s[k]; }
   $('sound').value = s.sound; $('dither').value = s.dither ? '1' : '0'; $('cleanup').value = s.cleanup;
   $('smooth').value = s.smooth ? '1' : '0'; $('matchFps').value = s.match_fps ? '1' : '0';
+  $('blend').value = s.blend ? '1' : '0';
 }
 for (const k of sliders) $(k).oninput = () => { settingsDirty = true; $(k + 'V').textContent = $(k).value; };
-$('sound').onchange = $('dither').onchange = $('cleanup').onchange = $('smooth').onchange = $('matchFps').onchange = () => { settingsDirty = true; };
+$('sound').onchange = $('dither').onchange = $('cleanup').onchange = $('smooth').onchange = $('matchFps').onchange = $('blend').onchange = () => { settingsDirty = true; };
 function saveSettings() {
   post('/api/settings', {fps: +$('fps').value, brightness: +$('brightness').value, contrast: +$('contrast').value,
                          sound: $('sound').value, dither: $('dither').value === '1', cleanup: $('cleanup').value,
-                         smooth: $('smooth').value === '1', match_fps: $('matchFps').value === '1'})
+                         smooth: $('smooth').value === '1', match_fps: $('matchFps').value === '1', blend: $('blend').value === '1'})
     .then(s => { if (s) { settingsDirty = false; toast('Applied'); } });
 }
 function resetSettings() {
-  post('/api/settings', {fps: 24, brightness: 0, contrast: 1, sound: 'w4', dither: true, cleanup: 'strong', smooth: true, match_fps: true})
+  post('/api/settings', {fps: 24, brightness: 0, contrast: 1, sound: 'w4', dither: true, cleanup: 'strong', smooth: true, match_fps: true, blend: true})
     .then(s => { if (s) { settingsDirty = false; loadSettings(); toast('Defaults restored'); } });
 }
 
