@@ -31,6 +31,9 @@ from tvlink import CLEANUP, H, RATE, SILENCE, SOUND_METHODS, W, Source, TV, audi
 HERE = Path(__file__).resolve().parent
 CACHE = Path(os.environ.get("CHANNEL4_CACHE", HERE.parent / "cache"))
 CACHE.mkdir(parents=True, exist_ok=True)
+# Where new downloads go (e.g. a NAS share); clips already in CACHE stay there and
+# are used first, so the station keeps most of its lineup if the share is down.
+CLIPS = Path(os.environ.get("CHANNEL4_CLIPS") or CACHE)
 flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] if a.startswith("--")}
 
 DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False,
@@ -439,7 +442,8 @@ class Station:
         return rows
 
     def path(self, show):
-        return CACHE / f"{slug(show)}.mp4"
+        local = CACHE / f"{slug(show)}.mp4"
+        return local if CLIPS == CACHE or local.exists() else CLIPS / f"{slug(show)}.mp4"
 
     def fetch(self, show):
         """Download and shrink a show into the cache, once."""
@@ -810,7 +814,7 @@ class Station:
                       for s in self.lineup.get(k, [])]
                   for k in ("day", "night", "bumpers")}
         upcoming = self.peek()
-        disk = shutil.disk_usage(CACHE)
+        disk = shutil.disk_usage(CLIPS)  # where downloads go
         link = self.tv.stats
         return {"mode": self.mode, "block": self.block(), "now": show(self.now), "upcoming": show(upcoming),
                 "coming": [r for r in self.guide(hours=2) if not r.get("on_now")][:6],
