@@ -8,7 +8,9 @@ unit in deploy/ grants it). The night block follows the box's own time zone.
 Plays the lineup nonstop to the ESP32 transmitter over one long-lived
 connection: the "day" list shuffled, the "night" list (creature features)
 from night_starts to night_ends, an "up next" card before each show.
-Clips come from archive.org once, shrunk to 320 px, into the cache.
+Clips come from archive.org once, shrunk to 320 px, into the cache. Black bars
+baked into a file are found once and cut off, and a picture that's nearly 4:3
+fills the screen.
 
 The web page (tools/web/index.html, LAN only, no sign-in) shows what's on
 with a live thumbnail and has the remote: skip, play a show now, stand by,
@@ -18,7 +20,7 @@ the picture/sound settings. "Play next" queues shows ahead of the lineup. Lineup
 
 Runs 24/7 as a systemd service on any small Linux box: see deploy/.
 """
-import io, json, os, random, subprocess, sys, threading, time, urllib.parse, urllib.request
+import io, json, os, random, re, subprocess, sys, threading, time, urllib.parse, urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -172,6 +174,7 @@ class Station:
         self.fetching = set()
         self.encoder = threading.Lock()  # one download at a time: shrinking is CPU-bound, and playback needs a core
         self.durations = load("durations.json", {})
+        self.framing = load("framing.json", {})  # slug -> {"crop", "fill"}: black bars to cut, zoom to fill
         self.resume = load("now.json", None)  # {"show", "pos"}: a restart picks the show up where it was
         self.bulk = None                      # progress of a "download all"
         self.bags = {}                   # block -> shuffled shows not played yet
@@ -249,6 +252,7 @@ class Station:
             return None
         tmp.rename(out)
         self.duration(show)
+        self.frame_up(show)
         return out
 
     def duration(self, show):
@@ -262,6 +266,53 @@ class Station:
             except ValueError:
                 return 0.0
         return self.durations.get(key, 0.0)
+
+    def frame_up(self, show):
+        """Find black bars baked into the file (a 4:3 cartoon inside a 16:9 frame
+        gets shrunk into a box with bars all round), once per show. Several
+        samples, keeping the widest picture any of them sees, so a dark scene
+        isn't mistaken for a bar."""
+        key = slug(show)
+        if key in self.framing or not self.path(show).exists():
+            return self.framing.get(key)
+        path, length = self.path(show), self.duration(show)
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                            "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+        try:
+            full_w, full_h = (int(v) for v in r.stdout.split(",")[:2])
+        except ValueError:
+            return None
+        boxes = []
+        for share in (0.1, 0.25, 0.4, 0.55, 0.7, 0.85):
+            r = subprocess.run(["nice", "-n", "19", "ffmpeg", "-nostdin", "-ss", f"{length * share:.1f}", "-i", str(path),
+                                "-t", "3", "-vf", "cropdetect=limit=0.1:round=2:reset=0", "-an", "-f", "null", "-"],
+                               capture_output=True, text=True)
+            found = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", r.stderr)
+            if found:
+                w, h, x, y = (int(v) for v in found[-1])
+                boxes.append((x, y, x + w, y + h))
+        framing = {"crop": None, "fill": False}
+        if boxes:
+            x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+            x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+            w, h = x1 - x0, y1 - y0
+            if w * h >= 0.4 * full_w * full_h:  # anything smaller is a misread, not bars
+                if (w, h) != (full_w, full_h):
+                    framing["crop"] = f"{w}:{h}:{x0}:{y0}"
+                full_w, full_h = w, h
+        framing["fill"] = abs(full_w / full_h / (W / H) - 1) <= 0.15  # nearly 4:3: no thin bars
+        self.framing[key] = framing
+        save("framing.json", self.framing)
+        return framing
+
+    def frame_up_all(self):
+        """Measure the shows cached before framing existed, in the background."""
+        for show in self.lineup["day"] + self.lineup["night"]:
+            try:
+                with self.encoder:  # CPU-bound like a download: one at a time
+                    self.frame_up(show)
+            except Exception as e:
+                print(f"framing failed: {show['title']}: {e!r}", flush=True)
 
     # -- sending ----------------------------------------------------------------
     def interrupted(self):
@@ -290,8 +341,9 @@ class Station:
         self.length = self.duration(show)
         while True:
             fps, s = self.settings["fps"], self.settings
+            framing = self.framing.get(slug(show)) or {}
             source = Source.file(path, start, fps=fps, brightness=s["brightness"], contrast=s["contrast"],
-                                 cleanup=s["cleanup"])
+                                 cleanup=s["cleanup"], crop=framing.get("crop"), fill=framing.get("fill", False))
             n = 0
             try:
                 for gray, mulaw in source:
@@ -501,6 +553,8 @@ class Station:
             self.path(show).unlink(missing_ok=True)
             self.durations.pop(key, None)
             save("durations.json", self.durations)
+            self.framing.pop(key, None)
+            save("framing.json", self.framing)
 
 
 station = Station()
@@ -594,5 +648,6 @@ class Remote(BaseHTTPRequestHandler):
 port = int(flags.get("--port") or 80)
 server = ThreadingHTTPServer(("0.0.0.0", port), Remote)  # bind first: a refused port stops us before we touch the TV
 threading.Thread(target=station.run, daemon=True).start()
+threading.Thread(target=station.frame_up_all, daemon=True).start()
 print(f"remote on http://0.0.0.0:{port}/", flush=True)
 server.serve_forever()
