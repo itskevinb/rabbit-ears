@@ -418,7 +418,7 @@ function renderLineup() {
   setHTML($('shows'), list.length ? list.map(({s, i}) => {
     const playing = state.now && state.now.slug === s.slug && state.mode === 'lineup';
     return `<li class="show${playing ? ' playing' : ''}${openSlug === s.slug ? ' open' : ''}">
-      <div class="name">${dot(s)}${named(s)}${tab !== 'bumpers' ? `<span class="tag">${KIND[s.kind]}</span>` : ''}${s.season ? `<span class="tag">${s.season === 'halloween' ? '🎃' : '🎄'}</span>` : ''}
+      <div class="name">${dot(s)}${named(s)}${tab !== 'bumpers' ? `<span class="tag">${KIND[s.kind]}</span>` : s.block ? `<span class="tag">${s.block === 'night' ? '🌙 late night' : '☀️ daytime'}</span>` : ''}${s.season ? `<span class="tag">${s.season === 'halloween' ? '🎃' : '🎄'}</span>` : ''}
         <small>${playing ? 'on now · ' : ''}${s.length ? fmt(s.length) : status(s)}</small></div>
       <div class="actions">
         <button class="small" onclick="playNow('${s.slug}')">Play now</button>
@@ -429,6 +429,7 @@ function renderLineup() {
         <button class="small" onclick="move(${i},1)" ${i < n - 1 ? '' : 'disabled'}>↓ Down</button>
         ${tab !== 'bumpers' ? `<button class="small" onclick="swapBlock(${i})">To ${other}</button>
         <select class="small" style="width:auto;padding:4px 6px" onchange="setField(${i}, 'kind', this.value)">${opts([['cartoon', 'Cartoon'], ['short', 'Short'], ['feature', 'Movie']], s.kind)}</select>` : ''}
+        ${tab === 'bumpers' ? `<select class="small" style="width:auto;padding:4px 6px" onchange="setField(${i}, 'block', this.value)">${opts([['', 'Day and night'], ['day', 'Daytime only'], ['night', 'Late night only']], s.block || '')}</select>` : ''}
         <select class="small" style="width:auto;padding:4px 6px" onchange="setField(${i}, 'season', this.value)">${opts([['', 'Any time of year'], ['halloween', 'Halloween only'], ['christmas', 'Christmas only']], s.season || '')}</select>
         <button class="small danger" onclick="removeShow(${i})">Remove</button></div></li>`;
   }).join('') : `<li class="show"><div class="name"><small>${want ? 'No match.' : 'No shows here yet. Add one above.'}</small></div></li>`);
@@ -438,7 +439,7 @@ $('filter').oninput = renderLineup;
 function plainLineup() {
   // kind goes back only when it was set by hand (the station guesses the rest)
   const strip = s => ({title: s.title, year: s.year, item: s.item, file: s.file, ...(s.kind_set ? {kind: s.kind} : {}),
-                       ...(s.season ? {season: s.season} : {})});
+                       ...(s.season ? {season: s.season} : {}), ...(s.block ? {block: s.block} : {})});
   return {day: state.lineup.day.map(strip), night: state.lineup.night.map(strip), bumpers: (state.lineup.bumpers || []).map(strip),
           night_starts: state.lineup.night_starts, night_ends: state.lineup.night_ends, schedule: {...state.schedule}};
 }

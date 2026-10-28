@@ -8,7 +8,7 @@ unit in deploy/ grants it). The night block follows the box's own time zone.
 Plays the lineup nonstop to the ESP32 transmitter over one long-lived
 connection: the "day" list shuffled, the "night" list (creature features)
 from night_starts to night_ends, an "up next" card before each show.
-Clips come from archive.org once, shrunk to 320 px, into the cache. Black bars
+Clips come from archive.org once, shrunk to 256 px, into the cache. Black bars
 baked into a file are found once and cut off, and a picture that's nearly 4:3
 fills the screen.
 
@@ -316,7 +316,9 @@ class Station:
         shows = self.lineup.get(pool) or []
         if not shows:
             return None
-        ok = (lambda s: self.fits(s, when)) if rules else (lambda s: in_season(s, when))
+        # commercials: their season, and their block if they have one (late-night spots)
+        ok = (lambda s: self.fits(s, when)) if rules else (
+            lambda s: in_season(s, when) and s.get("block", self.block(when)) == self.block(when))
         bag = self.bags.setdefault(pool, [])
         bag[:] = [s for s in bag if s in shows]
         for refill in (False, True):
@@ -470,7 +472,9 @@ class Station:
             time.sleep(wait)
             print(f"fetching {show['title']}" + (f" (try {attempt + 1})" if attempt else ""), flush=True)
             audio_only = show["file"].lower().endswith((".mp3", ".ogg", ".flac", ".wav", ".m4a"))
-            shrink = ["-vn"] if audio_only else ["-vf", "scale=320:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26"]
+            # 256 wide at CRF 28: the set gets 256x192 at 16 greys, so this looks the same
+            # there at about half the size of the old 320/CRF 26 (a feature ~50 MB, not ~120)
+            shrink = ["-vn"] if audio_only else ["-vf", "scale=256:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
             r = subprocess.run(["nice", "-n", "19", "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
                                 "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
                                 "-i", url, *shrink, "-ac", "1", "-c:a", "aac", str(tmp)])
@@ -853,6 +857,8 @@ class Station:
                     show["kind"] = s["kind"]
                 if s.get("season") in SEASONS:
                     show["season"] = s["season"]
+                if block == "bumpers" and s.get("block") in ("day", "night"):
+                    show["block"] = s["block"]  # a commercial for one block only
                 clean[block].append(show)
         with self.lock:
             self.lineup = clean

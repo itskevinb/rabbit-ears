@@ -107,7 +107,7 @@ python3 tools/station.py --port=8080           # then open http://localhost:8080
 - Shows tagged **Halloween** or **Christmas** only play in season, and twice as often then.
 - **Commercial breaks:** "we'll be right back", then one or two vintage spots from the commercials list.
 - **Broadcast day:** at sign-off it plays *O Canada* (the Columbia Mixed Quartette, 1913) over the flag, holds the test pattern until sign-on, and plays it again in the morning.
-- Each show is fetched once from archive.org, shrunk to 320 px, and kept in `cache/`. Black bars baked into a file are cut off, and a picture that's nearly 4:3 fills the screen.
+- Each show is fetched once from archive.org, shrunk to 256 px, and kept in `cache/`. Black bars baked into a file are cut off, and a picture that's nearly 4:3 fills the screen.
 - Pictures go out with a 4x4 ordered dither down to the board's 16 greys, and each show at its own frame rate (24 for film, 30 for TV transfers), capped by the setting. Keep the cap at 24: at 256x192 the board falls behind at 30.
 - An "up next" card plays before each show. If the station restarts, it picks up where it left off.
 
