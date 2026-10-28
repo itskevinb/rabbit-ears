@@ -7,7 +7,7 @@ An ESP32 that runs its own little TV station for a vintage black-and-white tube 
 - 256×192 picture, 16 greys, 24 fps
 - FM sound on its own carrier, 4.5 MHz above the picture, the way real NTSC does it
 - Video and audio streamed over Wi-Fi (TCP, zlib-compressed frames) or USB
-- A 24/7 "Channel 4" lineup: day block, night block, an "up next" card, a play-next queue, skip, mute, volume and sound cleanup for old prints, all from a LAN web page
+- A 24/7 "Channel 4" lineup run like an old station: a TV guide, Saturday-morning cartoons, vintage commercials between shows, Halloween and Christmas specials in season, and a sign-off with *O Canada* and the test pattern overnight, all from a LAN web page
 
 The set it was built for has nothing on the back except 300 Ω VHF and UHF screw terminals. No composite input, no coax.
 
@@ -86,16 +86,21 @@ python3 tools/station.py --port=8080           # then open http://localhost:8080
 [`tools/station.py`](tools/station.py) plays the lineup nonstop:
 
 - The **day** block is shuffled, and the **night** block runs from 21:00 to 06:00 in the box's own time zone (containers often default to UTC, so set it). The lineup is seeded from [`tools/lineup.json`](tools/lineup.json).
-- Each show is fetched once from archive.org, shrunk to 320 px, and kept in `cache/`.
-- An "up next" card plays before each show.
-- If the station restarts, it picks up where it left off.
+- It **plans a few hours ahead**, drawing each show for the time it will start: weekend mornings are cartoons only, and features wait for the afternoon. Each show is a cartoon, short or feature (guessed from its length and title, or set by hand).
+- Shows tagged **Halloween** or **Christmas** only play in season, and twice as often then.
+- **Commercial breaks:** "we'll be right back", then one or two vintage spots from the commercials list.
+- **Broadcast day:** at sign-off it plays *O Canada* (the Columbia Mixed Quartette, 1913) over the flag, holds the test pattern until sign-on, and plays it again in the morning.
+- Each show is fetched once from archive.org, shrunk to 320 px, and kept in `cache/`. Black bars baked into a file are cut off, and a picture that's nearly 4:3 fills the screen.
+- Pictures go out with a 4x4 ordered dither down to the board's 16 greys, and each show at its own frame rate (24 for film, 30 for TV transfers), capped by the setting. Keep the cap at 24: at 256x192 the board falls behind at 30.
+- An "up next" card plays before each show. If the station restarts, it picks up where it left off.
 
 The web page ([`tools/web/index.html`](tools/web/index.html)) is built for a phone:
 
-- **Now playing:** a live thumbnail and a progress bar.
-- **Remote:** skip, mute, volume, back to the lineup, stand by, test pattern and sign off.
-- **Lineup:** a play-next queue and an editor with archive.org search.
-- **Settings:** picture and sound, including **sound cleanup**. That's click removal and denoising before the compressor, which brings the hiss in the pauses down about 27 dB without touching dialogue.
+- **Now:** a live thumbnail, the remote (skip, mute, volume, stand by, test pattern, sign off), the play-next queue and what's coming up.
+- **Guide:** the next 18 hours with estimated times.
+- **Lineup:** daytime, late night and commercials, with archive.org search, and each show's kind and season.
+- **Downloads:** what's cached, its size, and the space left.
+- **Settings:** picture and sound (including **sound cleanup**: click removal and denoising before the compressor, which brings the hiss in the pauses down about 27 dB without touching dialogue), the schedule, and the health of the link to the TV. With firmware that answers command `S`, the board reports its uptime, why it last restarted, free memory, signal and load every 30 seconds.
 
 There is **no sign-in**, so keep it on your LAN. The station refuses commands sent by other web pages (a foreign `Origin`, or a body that isn't JSON), but anyone on your network can use the remote.
 
