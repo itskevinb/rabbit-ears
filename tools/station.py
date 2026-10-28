@@ -34,7 +34,7 @@ CACHE.mkdir(parents=True, exist_ok=True)
 flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] if a.startswith("--")}
 
 DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False,
-                    "volume": 100, "cleanup": "strong"}
+                    "volume": 100, "cleanup": "strong", "smooth": True, "match_fps": True}
 
 
 def ulaw_decode(u):  # G.711, +/-32124
@@ -306,12 +306,45 @@ class Station:
         save("framing.json", self.framing)
         return framing
 
+    def source_fps(self, show):
+        """The show's own frame rate, rounded (23.976 -> 24, 29.97 -> 30), once per show."""
+        key = slug(show)
+        framing = self.framing.get(key)
+        if framing is not None and "fps" in framing:
+            return framing["fps"]
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate",
+                            "-of", "csv=p=0", str(self.path(show))], capture_output=True, text=True)
+        try:
+            num, _, den = r.stdout.strip().partition("/")
+            fps = round(float(num) / float(den or 1))
+        except ValueError:
+            return None
+        if framing is not None:  # measured with the framing; saved with it
+            framing["fps"] = fps
+            save("framing.json", self.framing)
+        return fps
+
+    def show_fps(self, show):
+        """The frame rate to send a show at. Converting 24 fps film to 30 repeats every
+        fourth frame (and 30 to 24 drops every fifth), which judders; matching the
+        show's own rate doesn't. The fps setting stays the ceiling (60 fps halves to 30)."""
+        cap = self.settings["fps"]
+        own = self.source_fps(show) if self.settings["match_fps"] else None
+        if not own or own < 8:
+            return cap
+        if own <= cap:
+            return own
+        if own % 2 == 0 and 20 <= own // 2 <= cap:
+            return own // 2
+        return cap
+
     def frame_up_all(self):
         """Measure the shows cached before framing existed, in the background."""
         for show in self.lineup["day"] + self.lineup["night"]:
             try:
                 with self.encoder:  # CPU-bound like a download: one at a time
                     self.frame_up(show)
+                    self.source_fps(show)
             except Exception as e:
                 print(f"framing failed: {show['title']}: {e!r}", flush=True)
 
@@ -341,10 +374,12 @@ class Station:
     def play(self, show, path, start=0.0):
         self.length = self.duration(show)
         while True:
-            fps, s = self.settings["fps"], self.settings
+            s = self.settings
+            fps = self.show_fps(show)
             framing = self.framing.get(slug(show)) or {}
             source = Source.file(path, start, fps=fps, brightness=s["brightness"], contrast=s["contrast"],
-                                 cleanup=s["cleanup"], crop=framing.get("crop"), fill=framing.get("fill", False))
+                                 cleanup=s["cleanup"], crop=framing.get("crop"), fill=framing.get("fill", False),
+                                 smooth=s["smooth"])
             n = 0
             try:
                 for gray, mulaw in source:
@@ -489,12 +524,14 @@ class Station:
     def set_settings(self, new):
         s = {**self.settings}
         s["fps"] = max(8, min(30, int(new.get("fps", s["fps"]))))
+        s["match_fps"] = bool(new.get("match_fps", s["match_fps"]))
+        s["smooth"] = bool(new.get("smooth", s["smooth"]))
         s["sound"] = new.get("sound", s["sound"]) if new.get("sound") in SOUND_METHODS else s["sound"]
         s["dither"] = bool(new.get("dither", s["dither"]))
         s["brightness"] = max(-0.5, min(0.5, float(new.get("brightness", s["brightness"]))))
         s["contrast"] = max(0.3, min(3.0, float(new.get("contrast", s["contrast"]))))
         s["cleanup"] = new.get("cleanup", s["cleanup"]) if new.get("cleanup") in CLEANUP else s["cleanup"]
-        picture = any(s[k] != self.settings[k] for k in ("fps", "brightness", "contrast", "cleanup"))  # reopen the source
+        picture = any(s[k] != self.settings[k] for k in ("fps", "match_fps", "smooth", "brightness", "contrast", "cleanup"))  # reopen the source
         board = any(s[k] != self.settings[k] for k in ("sound", "dither"))
         self.settings = s
         save("settings.json", s)

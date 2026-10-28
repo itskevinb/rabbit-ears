@@ -22,6 +22,23 @@ def setup_commands(sound="w4", dither=True):
     return cmd(SOUND_METHODS[sound]) + cmd("D" if dither else "d")
 
 
+# 4x4 ordered dither down to the 16 levels the board shows: smooth shading
+# instead of flat bands, and a fixed pattern that doesn't crawl or cost much
+# more to compress (~25%). One table per Bayer threshold, so it runs as
+# C-speed translates (~2.5 ms a frame); the output is already 16-level (q * 17).
+BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]]
+DITHER = [[bytes(min(15, int(v * 15 / 255 + (t + 0.5) / 16)) * 17 for v in range(256)) for t in row] for row in BAYER]
+
+
+def dither(gray):
+    out = bytearray(gray)
+    for y in range(H):
+        row, tables, o = gray[y * W:(y + 1) * W], DITHER[y & 3], y * W
+        for k in range(4):
+            out[o + k:o + W:4] = row[k::4].translate(tables[k])
+    return bytes(out)
+
+
 def pack(gray):
     """8-bit grey, W*H bytes -> 4-bit, two pixels per byte, left pixel high.
     (C-speed bytes ops: a per-pixel Python loop can't keep up at 256x192.)"""
@@ -81,10 +98,10 @@ class Source:
     """A clip decoded to frames: iterate for (grey frame, mu-law audio) pairs."""
 
     def __init__(self, inputs_video, inputs_audio, fps, brightness=0.0, contrast=1.0, duration=None, cleanup="strong",
-                 crop=None, fill=False):
+                 crop=None, fill=False, smooth=False):
         limit = ["-t", str(duration)] if duration else []
         base = ["ffmpeg", "-nostdin", "-loglevel", "error"]
-        self.fps = fps
+        self.fps, self.smooth = fps, smooth
         # stderr off: cutting a clip short (skip, play now) makes ffmpeg complain about the closed pipe
         self.video = subprocess.Popen([*base, *inputs_video, *limit, "-vf", video_filter(fps, brightness, contrast, crop, fill),
                                        "-an", "-f", "rawvideo", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -105,7 +122,7 @@ class Source:
             if len(gray) < W * H:
                 return
             want = audio_share(n, self.fps)
-            yield gray, self.audio.stdout.read(want).ljust(want, bytes([SILENCE]))
+            yield dither(gray) if self.smooth else gray, self.audio.stdout.read(want).ljust(want, bytes([SILENCE]))
             n += 1
 
     def close(self):
