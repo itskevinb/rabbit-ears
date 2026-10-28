@@ -87,6 +87,8 @@ volatile bool stream_reset;  // set by loop() for a new connection; the sound ta
 volatile int showing = -1;  // packet whose picture is on screen
 
 i2s_chan_handle_t pic_tx, sound_tx;
+TaskHandle_t pic_task_h, sound_task_h;
+volatile bool ota_busy;  // an update is running: the generators are stopped and the queue is freed
 // Picture lines run one sigma-delta pass over the slots: level = pal[src[slot]],
 // where pal[0..VID_W-1] holds this line's pixel levels and the last two entries
 // are sync and black. Blank and vsync lines never change, so they're
@@ -449,8 +451,8 @@ void setup() {
   sound_tx = start_i2s(I2S_NUM_1, 5);
   // Sound (~82%) gets core 0 to itself; picture (~60%) shares core 1 with
   // loop(), which receives the serial stream.
-  xTaskCreatePinnedToCore(sound_task, "sound", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 0);
-  xTaskCreatePinnedToCore(picture_task, "pic", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 1);
+  xTaskCreatePinnedToCore(sound_task, "sound", 4096, NULL, configMAX_PRIORITIES - 1, &sound_task_h, 0);
+  xTaskCreatePinnedToCore(picture_task, "pic", 4096, NULL, configMAX_PRIORITIES - 2, &pic_task_h, 1);
   WiFi.mode(WIFI_STA);
   WiFi.setHostname("tubetv");
   WiFi.setSleep(false);  // power save adds tens of ms of latency and kills throughput
@@ -532,6 +534,7 @@ template <typename Link> bool read_full(Link &in, uint8_t *buf, size_t n) {
 // data then holds the sender back).
 template <typename Link> void receive(Link &in, int &matched) {
   static bool compressed;
+  if (ota_busy) return;  // the packet slots are gone
   while (in.available()) {
     if (matched != 4) {  // 1 = saw A5, 2 = A5 5A, 3 = "V", 4 = "V2", 5 = "C"
       int c = in.read();
@@ -612,11 +615,30 @@ void network_task(void *) {
       ArduinoOTA.setHostname("tubetv");
       ArduinoOTA.setMdnsEnabled(false);  // MDNS is already up, as tubetv
       ArduinoOTA.setPassword(OTA_PASSWORD);
+      // An update arrives faster than flash erases go, and with the stream's
+      // ~100 KB of packet slots in use the received data ran the heap out
+      // (a crash at 43%). So stop the generators and free the slots first;
+      // there's no going back after that, so an error reboots the old build.
       ArduinoOTA.onStart([] {
         Serial.println("#ota start");
-        if (client) client.stop();  // free the stream's buffers for the update
+        ota_busy = true;
+        if (client) client.stop();
+        // Suspend, don't i2s_channel_disable(): a task parked inside
+        // i2s_channel_write holds the channel lock, and disable waits on it
+        // forever. The DMA just keeps cycling its last buffers.
+        vTaskSuspend(pic_task_h);
+        vTaskSuspend(sound_task_h);
+        for (int i = 0; i < NQ; i++) {
+          free(queue[i]);
+          queue[i] = NULL;
+        }
+        Serial.printf("#ota heap %u\n", ESP.getFreeHeap());
       });
-      ArduinoOTA.onError([](ota_error_t e) { Serial.printf("#ota error %u\n", e); });
+      ArduinoOTA.onError([](ota_error_t e) {
+        Serial.printf("#ota error %u\n", e);
+        delay(100);
+        ESP.restart();
+      });
       ArduinoOTA.begin();
 #endif
       serving = true;
