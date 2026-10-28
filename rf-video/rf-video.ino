@@ -46,8 +46,13 @@
 // credits didn't survive: RF from the transmitter wires puts junk on the
 // serial lines, and some of it decoded as the credit byte.)
 //
+// Over-the-air updates (tools/ota.sh) when wifi_secrets.h defines OTA_PASSWORD:
+// ArduinoOTA on UDP 3232, password-protected, by IP (our own mDNS stays as is).
+// An update drops the stream first, for the heap, and reboots into the new build.
+//
 // Hold the wires NEAR the antenna screws, never touching: hot chassis.
 
+#include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <WiFi.h>
 #include "driver/i2s_std.h"
@@ -603,9 +608,23 @@ void network_task(void *) {
       MDNS.addService("tubetv", "tcp", 5000);
       server.begin();
       server.setNoDelay(true);
+#ifdef OTA_PASSWORD
+      ArduinoOTA.setHostname("tubetv");
+      ArduinoOTA.setMdnsEnabled(false);  // MDNS is already up, as tubetv
+      ArduinoOTA.setPassword(OTA_PASSWORD);
+      ArduinoOTA.onStart([] {
+        Serial.println("#ota start");
+        if (client) client.stop();  // free the stream's buffers for the update
+      });
+      ArduinoOTA.onError([](ota_error_t e) { Serial.printf("#ota error %u\n", e); });
+      ArduinoOTA.begin();
+#endif
       serving = true;
       Serial.printf("#wifi %s\n", WiFi.localIP().toString().c_str());
     }
+#ifdef OTA_PASSWORD
+    if (serving) ArduinoOTA.handle();  // an update runs to the end in here, then reboots
+#endif
     if (serving && server.hasClient()) {  // a new stream takes over
       client = server.available();
       client.setNoDelay(true);
