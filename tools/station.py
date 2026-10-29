@@ -39,7 +39,8 @@ CLIPS = Path(os.environ.get("CHANNEL4_CLIPS") or CACHE)
 flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] if a.startswith("--")}
 
 DEFAULT_SETTINGS = {"channel": "4", "fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False,
-                    "volume": 100, "cleanup": "strong", "smooth": True, "match_fps": True, "blend": True}
+                    "volume": 100, "cleanup": "strong", "smooth": True, "match_fps": True, "blend": True,
+                    "linearity": 0.0}
 
 # The broadcast day, kept in lineup.json next to the late-night hours.
 DEFAULT_SCHEDULE = {"cartoon_mornings": True, "mornings_from": 7, "mornings_to": 12,  # weekend mornings: cartoons only
@@ -81,6 +82,15 @@ def ulaw_encode(x):
     x = min(abs(x), 32635) + 0x84
     exp = min(7, x.bit_length() - 8)
     return ~(sign | exp << 4 | (x >> (exp + 3)) & 0x0F) & 0xFF
+
+
+def row_map(k):
+    """Which picture row each scan line shows, to undo a tube's uneven vertical sweep:
+    k > 0 squeezes the top (where an old set spreads its lines out) and stretches the
+    bottom to match; 0 leaves the picture alone. A quadratic: the ends stay put."""
+    if not k:
+        return None
+    return [min(H - 1, max(0, round((t + k * t * (1 - t)) * (H - 1)))) for t in (y / (H - 1) for y in range(H))]
 
 
 def volume_table(volume):
@@ -293,6 +303,7 @@ class Station:
         self.ch = self.settings["channel"] if self.settings["channel"] in self.lineups else next(iter(self.lineups))
         ON_AIR.update(number=self.lineup["number"], name=self.channel_name(self.lineup))
         self.volume_lut = volume_table(self.settings["volume"])
+        self.rows = row_map(self.settings["linearity"])
         self.tv = TV(flags.get("--host") or "tubetv.local", self.setup())
         self.mode = "lineup"            # lineup | standby | testcard | off
         self.now = self.upcoming = None  # shows
@@ -811,6 +822,8 @@ class Station:
             mulaw = bytes([SILENCE]) * len(mulaw)
         elif self.settings["volume"] < 100:
             mulaw = mulaw.translate(self.volume_lut)
+        if self.rows:  # vertical linearity: pick the rows the tube will spread evenly
+            gray = b"".join(gray[r * W:(r + 1) * W] for r in self.rows)
         self.tv.send(packet(gray, mulaw))
         self.frame = gray
 
@@ -1157,6 +1170,8 @@ class Station:
         s["match_fps"] = bool(new.get("match_fps", s["match_fps"]))
         s["smooth"] = bool(new.get("smooth", s["smooth"]))
         s["blend"] = bool(new.get("blend", s["blend"]))
+        s["linearity"] = max(-0.4, min(0.4, float(new.get("linearity", s["linearity"]))))
+        self.rows = row_map(s["linearity"])
         s["sound"] = new.get("sound", s["sound"]) if new.get("sound") in SOUND_METHODS else s["sound"]
         s["dither"] = bool(new.get("dither", s["dither"]))
         s["brightness"] = max(-0.5, min(0.5, float(new.get("brightness", s["brightness"]))))

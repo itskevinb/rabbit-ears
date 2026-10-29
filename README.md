@@ -121,7 +121,7 @@ The web page ([`tools/web/index.html`](tools/web/index.html)) is built for a pho
 - **Guide:** the next 18 hours with estimated times.
 - **Lineup:** daytime, late night and commercials, with archive.org search, and each show's kind and season.
 - **Downloads:** what's cached, its size, and the space left.
-- **Settings:** picture and sound (including **sound cleanup**: click removal and denoising before the compressor, which brings the hiss in the pauses down about 27 dB without touching dialogue), the schedule, and the health of the link to the TV. With firmware that answers command `S`, the board reports its uptime, why it last restarted, free memory, signal and load every 30 seconds.
+- **Settings:** picture and sound (including **vertical linearity**: old tubes spread the top lines further apart, so a circle comes out egg-shaped; a slider squeezes the top and stretches the bottom to match, tuned live against the test pattern, and **sound cleanup**: click removal and denoising before the compressor, which brings the hiss in the pauses down about 27 dB without touching dialogue), the schedule, and the health of the link to the TV. With firmware that answers command `S`, the board reports its uptime, why it last restarted, free memory, signal and load every 30 seconds.
 
 There is **no sign-in**, so keep it on your LAN. The station refuses commands sent by other web pages (a foreign `Origin`, or a body that isn't JSON), but anyone on your network can use the remote.
 

@@ -256,6 +256,9 @@
       <label>Highest frame rate: <b id="fpsV"></b> fps</label><input type="range" id="fps" min="20" max="30" step="1">
       <label>Brightness: <b id="brightnessV"></b></label><input type="range" id="brightness" min="-0.5" max="0.5" step="0.05">
       <label>Contrast: <b id="contrastV"></b></label><input type="range" id="contrast" min="0.3" max="3" step="0.05">
+      <label>Vertical linearity: <b id="linearityV"></b></label><input type="range" id="linearity" min="-0.4" max="0.4" step="0.02">
+      <p class="note">Old tubes spread the lines at the top of the screen further apart than at the bottom. Put up the
+        test pattern and slide this until its circle is round: right squeezes the top, left the bottom. It changes as you slide.</p>
       <div class="grid2">
         <div><label for="sound">Sound method</label>
           <select id="sound">
@@ -637,7 +640,12 @@ function renderHealth() {
     : 'The board\'s own numbers (uptime, why it last restarted, memory, signal) appear here once it runs the new firmware.';
 }
 
-let volumeTimer;
+let volumeTimer, linearityTimer;
+$('linearity').oninput = () => {  // live, like the volume: tuned by eye against the test pattern
+  $('linearityV').textContent = $('linearity').value;
+  clearTimeout(linearityTimer);
+  linearityTimer = setTimeout(() => post('/api/settings', {linearity: +$('linearity').value}), 200);
+};
 $('volume').oninput = () => {  // live while dragging, at most ~4 updates a second
   $('volumeV').textContent = $('volume').value;
   clearTimeout(volumeTimer);
@@ -647,6 +655,7 @@ const sliders = ['fps', 'brightness', 'contrast'];
 function loadSettings() {
   const s = state.settings;
   for (const k of sliders) { $(k).value = s[k]; $(k + 'V').textContent = s[k]; }
+  if (document.activeElement !== $('linearity')) { $('linearity').value = s.linearity || 0; $('linearityV').textContent = s.linearity || 0; }
   $('sound').value = s.sound; $('dither').value = s.dither ? '1' : '0'; $('cleanup').value = s.cleanup;
   $('smooth').value = s.smooth ? '1' : '0'; $('matchFps').value = s.match_fps ? '1' : '0';
   $('blend').value = s.blend ? '1' : '0';
