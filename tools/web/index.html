@@ -173,6 +173,7 @@
     <section>
       <div class="tabs">
         <button id="tab-day" onclick="tab='day'; renderLineup()">Daytime</button>
+        <button id="tab-evening" onclick="tab='evening'; renderLineup()">Prime time</button>
         <button id="tab-night" onclick="tab='night'; renderLineup()">Late night</button>
         <button id="tab-bumpers" onclick="tab='bumpers'; renderLineup()">Commercials</button>
         <span class="grow"></span>
@@ -186,7 +187,7 @@
           <label for="pTitle">Title</label><input type="text" id="pTitle">
           <div class="grid2">
             <div><label for="pYear">Year</label><input type="text" id="pYear"></div>
-            <div><label for="pBlock">Block</label><select id="pBlock"><option value="day">Daytime</option><option value="night">Late night</option><option value="bumpers">Commercials</option></select></div>
+            <div><label for="pBlock">Block</label><select id="pBlock"><option value="day">Daytime</option><option value="evening">Prime time</option><option value="night">Late night</option><option value="bumpers">Commercials</option></select></div>
           </div>
           <label for="pFile">Video file</label><select id="pFile"></select>
           <p class="note">Only add films that are in the public domain.</p>
@@ -198,7 +199,7 @@
 
       <input type="search" id="filter" placeholder="Find in the lineup" style="margin-bottom:6px">
       <ul id="shows"></ul>
-      <p class="note">Tap ⋯ to set what kind of show it is (cartoon, short, feature), give it a season (Halloween: October; Christmas: December 1–26), move it, switch its block or remove it. The schedule is in Settings.</p>
+      <p class="note">Tap ⋯ to set what kind of show it is (cartoon, short, episode, movie), give it a season (Halloween: October; Christmas: December 1–26), move it, switch its block or remove it. The schedule is in Settings.</p>
     </section>
   </div>
 
@@ -271,11 +272,17 @@
     <section>
       <h2>Schedule</h2>
       <div class="grid2">
+        <div><label for="eveningStarts">Prime time starts</label><select id="eveningStarts" class="hour"></select></div>
         <div><label for="nightStarts">Late night starts</label><select id="nightStarts" class="hour"></select></div>
         <div><label for="nightEnds">Late night ends</label><select id="nightEnds" class="hour"></select></div>
         <div><label for="featuresFrom">Daytime features start after</label><select id="featuresFrom" class="hour"></select></div>
         <div><label for="breaks">Commercials between shows</label>
           <select id="breaks"><option value="off">None</option><option value="light">One (recommended)</option><option value="classic">Two, like the old days</option></select></div>
+      </div>
+      <label class="check"><input type="checkbox" id="onTheClock"> Shows start on the hour and half hour, with commercials (or a short) until then</label>
+      <div class="grid2">
+        <div><label for="fillMax">Most commercials in a row</label>
+          <select id="fillMax"><option value="5">5 minutes</option><option value="8">8 minutes</option><option value="10">10 minutes</option><option value="12">12 minutes</option><option value="15">15 minutes</option></select></div>
       </div>
       <label class="check"><input type="checkbox" id="cartoonMornings"> Weekend mornings are cartoons only</label>
       <div class="grid2">
@@ -287,7 +294,7 @@
         <div><label for="signOff">Sign off at</label><select id="signOff" class="hour"></select></div>
         <div><label for="signOn">Sign on at</label><select id="signOn" class="hour"></select></div>
       </div>
-      <p class="note">Daytime plays outside the late-night hours. Halloween and Christmas shows only play in their season, and more often then.</p>
+      <p class="note">Prime time runs from its hour until late night (set it to the late-night hour for none); daytime plays the rest. With more time to fill than the most commercials in a row, a short cartoon goes in first. Halloween and Christmas shows only play in their season, and more often then.</p>
     </section>
 
     <section>
@@ -342,7 +349,7 @@ async function refresh() {
 function render() {
   const s = state;
   $('clock').textContent = s.clock;
-  $('block').textContent = s.block === 'night' ? 'Late night' : 'Daytime';
+  $('block').textContent = BLOCK[s.block] || 'Daytime';
   const m = $('mode');
   m.textContent = {lineup: 'On the air', standby: 'Standing by', testcard: 'Test pattern', off: 'Off the air'}[s.mode];
   m.className = 'badge ' + {lineup: 'on', standby: 'warn', testcard: 'warn', off: 'off'}[s.mode];
@@ -390,7 +397,8 @@ async function loadGuide(force) {
   guideAt = Date.now();
   try { renderGuide(await (await fetch('/api/guide?hours=18')).json()); } catch (e) { /* next refresh */ }
 }
-const KIND = {cartoon: 'Cartoon', short: 'Short', feature: 'Movie'};
+const KIND = {cartoon: 'Cartoon', short: 'Short', episode: 'Episode', feature: 'Movie'};
+const BLOCK = {day: 'Daytime', evening: 'Prime time', night: 'Late night'};
 function renderGuide(rows) {
   let lastDay = null;
   const day = ts => new Date(ts * 1000).toLocaleDateString([], {weekday: 'long'});
@@ -410,18 +418,18 @@ function renderGuide(rows) {
 // ---- Lineup ----
 function renderLineup() {
   if (!state) return;
-  for (const b of ['day', 'night', 'bumpers']) {
+  for (const b of ['day', 'evening', 'night', 'bumpers']) {
     $('tab-' + b).classList.toggle('active', tab === b);
-    $('tab-' + b).textContent = {day: 'Daytime', night: 'Late night', bumpers: 'Commercials'}[b] + ` (${(state.lineup[b] || []).length})`;
+    $('tab-' + b).textContent = {...BLOCK, bumpers: 'Commercials'}[b] + ` (${(state.lineup[b] || []).length})`;
   }
   const want = $('filter').value.trim().toLowerCase();
   const list = (state.lineup[tab] || []).map((s, i) => ({s, i})).filter(({s}) => !want || s.title.toLowerCase().includes(want));
-  const other = tab === 'day' ? 'Late night' : 'Daytime', n = (state.lineup[tab] || []).length;
+  const n = (state.lineup[tab] || []).length;
   const opts = (pairs, value) => pairs.map(([v, t]) => `<option value="${v}"${v === value ? ' selected' : ''}>${t}</option>`).join('');
   setHTML($('shows'), list.length ? list.map(({s, i}) => {
     const playing = state.now && state.now.slug === s.slug && state.mode === 'lineup';
     return `<li class="show${playing ? ' playing' : ''}${openSlug === s.slug ? ' open' : ''}">
-      <div class="name">${dot(s)}${named(s)}${tab !== 'bumpers' ? `<span class="tag">${KIND[s.kind]}</span>` : s.block ? `<span class="tag">${s.block === 'night' ? '🌙 late night' : '☀️ daytime'}</span>` : ''}${s.season ? `<span class="tag">${s.season === 'halloween' ? '🎃' : '🎄'}</span>` : ''}
+      <div class="name">${dot(s)}${named(s)}${tab !== 'bumpers' ? `<span class="tag">${KIND[s.kind]}</span>` : s.block ? `<span class="tag">${{day: '☀️ daytime', evening: '📺 prime time', night: '🌙 late night'}[s.block]}</span>` : ''}${s.season ? `<span class="tag">${s.season === 'halloween' ? '🎃' : '🎄'}</span>` : ''}
         <small>${playing ? 'on now · ' : ''}${s.length ? fmt(s.length) : status(s)}</small></div>
       <div class="actions">
         <button class="small" onclick="playNow('${s.slug}')">Play now</button>
@@ -430,9 +438,9 @@ function renderLineup() {
       <div class="more">
         <button class="small" onclick="move(${i},-1)" ${i ? '' : 'disabled'}>↑ Up</button>
         <button class="small" onclick="move(${i},1)" ${i < n - 1 ? '' : 'disabled'}>↓ Down</button>
-        ${tab !== 'bumpers' ? `<button class="small" onclick="swapBlock(${i})">To ${other}</button>
-        <select class="small" style="width:auto;padding:4px 6px" onchange="setField(${i}, 'kind', this.value)">${opts([['cartoon', 'Cartoon'], ['short', 'Short'], ['feature', 'Movie']], s.kind)}</select>` : ''}
-        ${tab === 'bumpers' ? `<select class="small" style="width:auto;padding:4px 6px" onchange="setField(${i}, 'block', this.value)">${opts([['', 'Day and night'], ['day', 'Daytime only'], ['night', 'Late night only']], s.block || '')}</select>` : ''}
+        ${tab !== 'bumpers' ? `<select class="small" style="width:auto;padding:4px 6px" onchange="moveBlock(${i}, this.value)">${opts(Object.entries(BLOCK).map(([b, t]) => [b, b === tab ? t : 'To ' + t.toLowerCase()]), tab)}</select>
+        <select class="small" style="width:auto;padding:4px 6px" onchange="setField(${i}, 'kind', this.value)">${opts(Object.entries(KIND), s.kind)}</select>` : ''}
+        ${tab === 'bumpers' ? `<select class="small" style="width:auto;padding:4px 6px" onchange="setField(${i}, 'block', this.value)">${opts([['', 'Any time'], ['day', 'Daytime only'], ['evening', 'Prime time only'], ['night', 'Late night only']], s.block || '')}</select>` : ''}
         <select class="small" style="width:auto;padding:4px 6px" onchange="setField(${i}, 'season', this.value)">${opts([['', 'Any time of year'], ['halloween', 'Halloween only'], ['christmas', 'Christmas only']], s.season || '')}</select>
         <button class="small danger" onclick="removeShow(${i})">Remove</button></div></li>`;
   }).join('') : `<li class="show"><div class="name"><small>${want ? 'No match.' : 'No shows here yet. Add one above.'}</small></div></li>`);
@@ -441,10 +449,14 @@ $('filter').oninput = renderLineup;
 
 function plainLineup() {
   // kind goes back only when it was set by hand (the station guesses the rest)
+  // start and end: a spot cut from a reel of commercials
   const strip = s => ({title: s.title, year: s.year, item: s.item, file: s.file, ...(s.kind_set ? {kind: s.kind} : {}),
-                       ...(s.season ? {season: s.season} : {}), ...(s.block ? {block: s.block} : {})});
-  return {day: state.lineup.day.map(strip), night: state.lineup.night.map(strip), bumpers: (state.lineup.bumpers || []).map(strip),
-          night_starts: state.lineup.night_starts, night_ends: state.lineup.night_ends, schedule: {...state.schedule}};
+                       ...(s.season ? {season: s.season} : {}), ...(s.block ? {block: s.block} : {}),
+                       ...(s.start ? {start: s.start} : {}), ...(s.end ? {end: s.end} : {})});
+  const list = b => (state.lineup[b] || []).map(strip);
+  return {day: list('day'), evening: list('evening'), night: list('night'), bumpers: list('bumpers'),
+          night_starts: state.lineup.night_starts, evening_starts: state.lineup.evening_starts ?? state.lineup.night_starts,
+          night_ends: state.lineup.night_ends, schedule: {...state.schedule}};
 }
 function setField(i, key, value) {
   saveLineup(l => { const s = l[tab][i]; if (value) s[key] = value; else delete s[key]; }, 'Saved').then(() => loadGuide(true));
@@ -457,7 +469,7 @@ function saveLineup(patch, msg) {
 function playNow(slug) { post('/api/play', {slug}).then(s => s && toast('Switching…')); }
 function playNext(slug) { post('/api/queue', {slug}).then(s => s && toast('Queued')); }
 function move(i, d) { saveLineup(l => { const a = l[tab]; [a[i], a[i + d]] = [a[i + d], a[i]]; }); }
-function swapBlock(i) { const to = tab === 'day' ? 'night' : 'day'; openSlug = null; saveLineup(l => l[to].push(...l[tab].splice(i, 1)), 'Moved'); }
+function moveBlock(i, to) { if (to === tab) return; openSlug = null; saveLineup(l => l[to].push(...l[tab].splice(i, 1)), 'Moved'); }
 function removeShow(i) {
   const s = state.lineup[tab][i];
   if (confirm(`Remove ${s.title} from the lineup?`)) { openSlug = null; saveLineup(l => l[tab].splice(i, 1), 'Removed'); }
@@ -501,7 +513,7 @@ function addShow() {
 // ---- Downloads ----
 function allShows() {
   const seen = new Set(), out = [];
-  for (const b of ['day', 'night', 'bumpers']) for (const s of state.lineup[b] || []) if (!seen.has(s.slug)) { seen.add(s.slug); out.push({...s, block: b}); }
+  for (const b of ['day', 'evening', 'night', 'bumpers']) for (const s of state.lineup[b] || []) if (!seen.has(s.slug)) { seen.add(s.slug); out.push({...s, block: b}); }
   return out;
 }
 function download(scope) { post('/api/download', {scope}).then(s => s && toast(s.bulk && s.bulk.total ? 'Downloading…' : 'Already downloaded')); }
@@ -524,7 +536,7 @@ function renderDownloads() {
   $('dtab-missing').textContent = `Not downloaded (${missing.length})`;
   $('dtab-ready').textContent = `Downloaded (${ready.length})`;
   const list = dtab === 'ready' ? [...ready].sort((a, b) => b.mb - a.mb) : missing;
-  const block = s => ({night: 'late night', bumpers: 'commercial'})[s.block] || 'daytime';
+  const block = s => ({evening: 'prime time', night: 'late night', bumpers: 'commercial'})[s.block] || 'daytime';
   setHTML($('dlList'), list.length ? list.map(s => `<li class="show"><div class="name">${dot(s)}${named(s)}
     <small>${block(s)} · ${dtab === 'ready' ? size(s.mb) + (s.length ? ' · ' + fmt(s.length) : '') : status(s)}</small></div>
     <div class="actions">${dtab === 'ready'
@@ -541,7 +553,7 @@ function uncache(slug) {
 // ---- Settings ----
 const saveSchedule = (patch, msg) => saveLineup(l => Object.assign(l.schedule, patch), msg || 'Schedule saved').then(() => loadGuide(true));
 function renderSchedule() {
-  const hours = [['nightStarts', 'night_starts', false], ['nightEnds', 'night_ends', false], ['featuresFrom', 'features_from', true],
+  const hours = [['eveningStarts', 'evening_starts', false], ['nightStarts', 'night_starts', false], ['nightEnds', 'night_ends', false], ['featuresFrom', 'features_from', true],
                  ['morningsFrom', 'mornings_from', true], ['morningsTo', 'mornings_to', true], ['signOff', 'sign_off', true], ['signOn', 'sign_on', true]];
   for (const [id, key, inSchedule] of hours) {
     const sel = $(id);
@@ -549,14 +561,19 @@ function renderSchedule() {
       for (let h = 0; h < 24; h++) sel.add(new Option(new Date(2000, 0, 1, h).toLocaleTimeString([], {hour: 'numeric'}), h));
       sel.onchange = () => inSchedule ? saveSchedule({[key]: +sel.value}) : saveLineup({[key]: +sel.value}, 'Hours saved').then(() => loadGuide(true));
     }
-    if (document.activeElement !== sel) sel.value = inSchedule ? state.schedule[key] : state.lineup[key];
+    if (document.activeElement !== sel) sel.value = inSchedule ? state.schedule[key] : state.lineup[key] ?? state.lineup.night_starts;
   }
   const sc = state.schedule;
   $('cartoonMornings').checked = sc.cartoon_mornings; $('offAir').checked = sc.off_air;
   if (document.activeElement !== $('breaks')) $('breaks').value = sc.breaks;
+  $('onTheClock').checked = sc.on_the_clock;
+  if (document.activeElement !== $('fillMax')) $('fillMax').value = sc.fill_max;
+  $('fillMax').disabled = !sc.on_the_clock;
   for (const id of ['morningsFrom', 'morningsTo']) $(id).disabled = !sc.cartoon_mornings;
   for (const id of ['signOff', 'signOn']) $(id).disabled = !sc.off_air;
 }
+$('onTheClock').onchange = () => saveSchedule({on_the_clock: $('onTheClock').checked});
+$('fillMax').onchange = () => saveSchedule({fill_max: +$('fillMax').value});
 $('cartoonMornings').onchange = () => saveSchedule({cartoon_mornings: $('cartoonMornings').checked});
 $('offAir').onchange = () => saveSchedule({off_air: $('offAir').checked});
 $('breaks').onchange = () => saveSchedule({breaks: $('breaks').value});

@@ -103,10 +103,11 @@ python3 tools/station.py --port=8080           # then open http://localhost:8080
 
 [`tools/station.py`](tools/station.py) plays the lineup nonstop:
 
-- The **day** block is shuffled, and the **night** block runs from 21:00 to 06:00 in the box's own time zone (containers often default to UTC, so set it). The lineup is seeded from [`tools/lineup.json`](tools/lineup.json).
-- It **plans a few hours ahead**, drawing each show for the time it will start: weekend mornings are cartoons only, and features wait for the afternoon. Each show is a cartoon, short or feature (guessed from its length and title, or set by hand).
+- Three blocks, each shuffled: **day**, **prime time** (from `evening_starts` until late night, empty in the seed) and **late night** (21:00 to 06:00 in the seed), in the box's own time zone (containers often default to UTC, so set it). The lineup is seeded from [`tools/lineup.json`](tools/lineup.json).
+- It **plans a few hours ahead**, drawing each show for the time it will start: weekend mornings are cartoons only, and features wait for the afternoon. Each show is a cartoon, short, episode or feature (guessed from its length and title, or set by hand).
+- **On the clock:** a show that ends near the hour or half hour is followed by commercials until then, so the next one starts on time. With more room than the "most commercials in a row" setting, a short that fits goes in first (in prime time, from the daytime list too), the way stations filled odd minutes. The odd seconds left over get a "You're watching Channel 4" card.
 - Shows tagged **Halloween** or **Christmas** only play in season, and twice as often then.
-- **Commercial breaks:** "we'll be right back", then one or two vintage spots from the commercials list.
+- **Commercial breaks:** "we'll be right back", then one or two vintage spots from the commercials list (or as many as fit, on the clock). A commercial can be for one block only. One can also be a stretch of a longer file (`start` and `end` in seconds): [`tools/reel.py`](tools/reel.py) cuts a reel of commercials into spots at the black frames between them and makes a contact sheet to name them by.
 - **Broadcast day:** at sign-off it plays *O Canada* (the Columbia Mixed Quartette, 1913) over the flag, holds the test pattern until sign-on, and plays it again in the morning.
 - Each show is fetched once from archive.org, shrunk to 256 px, and kept in `cache/`. Black bars baked into a file are cut off, and a picture that's nearly 4:3 fills the screen.
 - Pictures go out with a 4x4 ordered dither down to the board's 16 greys, and each show at its own frame rate (24 for film, 30 for TV transfers), capped by the setting. Keep the cap at 24: at 256x192 the board falls behind at 30.
@@ -144,6 +145,7 @@ The shows in the default lineup are films generally treated as public domain in 
 | `tools/tvlink.py` | Shared streaming code: ffmpeg decode, packing, audio filters, the Wi-Fi link |
 | `tools/play.py` | Stream one file by hand |
 | `tools/station.py`, `tools/web/` | The Channel 4 station and its web remote |
+| `tools/reel.py` | Cut a reel of commercials into spots for the lineup |
 | `tools/tv.py` | Serial tuning for `rf-tv` (`python3 tools/tv.py d0.2`) |
 | `tools/look.sh` | macOS camera and mic capture, to check the TV's picture and sound from a script |
 | `tools/ota.sh` | Over-the-air firmware update, pushed from the station box |

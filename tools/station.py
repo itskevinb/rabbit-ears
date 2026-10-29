@@ -6,8 +6,10 @@ The port defaults to 80, which needs root or CAP_NET_BIND_SERVICE (the systemd
 unit in deploy/ grants it). The night block follows the box's own time zone.
 
 Plays the lineup nonstop to the ESP32 transmitter over one long-lived
-connection: the "day" list shuffled, the "night" list (creature features)
-from night_starts to night_ends, an "up next" card before each show.
+connection: the "day" list shuffled, the "evening" list (prime time) from
+evening_starts, the "night" list (creature features) from night_starts to
+night_ends, shows on the hour and half hour with commercials between, and an
+"up next" card before each show.
 Clips come from archive.org once, shrunk to 256 px, into the cache. Black bars
 baked into a file are found once and cut off, and a picture that's nearly 4:3
 fills the screen.
@@ -43,14 +45,17 @@ DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0,
 DEFAULT_SCHEDULE = {"cartoon_mornings": True, "mornings_from": 7, "mornings_to": 12,  # weekend mornings: cartoons only
                     "features_from": 12,                                 # daytime features wait for the afternoon
                     "off_air": True, "sign_off": 1, "sign_on": 6,        # O Canada, then the test pattern overnight
-                    "breaks": "light"}                                   # commercials between shows
+                    "breaks": "light",                                   # commercials between shows
+                    "on_the_clock": True, "fill_max": 10}                # shows start on the hour and half hour
 BREAKS = {"off": 0, "light": 1, "classic": 2}
-KINDS = ("cartoon", "short", "feature")
-GUESS = {"cartoon": 420, "short": 1020, "feature": 4800, "bumper": 60}  # seconds, until a show is downloaded
+POOLS = ("day", "evening", "night")  # the blocks shows are drawn from; "bumpers" are the commercials
+KINDS = ("cartoon", "short", "episode", "feature")
+GUESS = {"cartoon": 420, "short": 1020, "episode": 1560, "feature": 4800, "bumper": 60}  # seconds, until downloaded
 SEASONS = {"halloween": ((10, 1), (10, 31)), "christmas": ((12, 1), (12, 26))}
 # Columbia Mixed Quartette, recorded 24 May 1913 (Columbia A1369): public domain.
 ANTHEM = {"title": "O Canada", "year": 1913, "item": "OCanada_284", "file": "OCanada.mp3"}
 IDENT, UP_NEXT = 4, 5  # seconds: "we'll be right back" before commercials, "up next" before a show
+SLOT = 30 * 60         # on the clock, shows start on the hour and the half hour
 # The board takes at most 800 audio samples a packet (AUD_MAX), so at 15625 Hz
 # nothing may go out under 20 fps: a 15 fps show sent as-is had every packet
 # thrown away (frozen picture, no sound).
@@ -93,6 +98,11 @@ def save(name, data):
 
 def slug(show):
     return "".join(c if c.isalnum() else "-" for c in show["title"].lower()).strip("-")
+
+
+def within(hour, start, end):
+    """Is the hour in [start, end), which may run past midnight?"""
+    return start <= hour < end if start <= end else hour >= start or hour < end
 
 
 def in_season(show, when):
@@ -282,9 +292,18 @@ class Station:
         return {**DEFAULT_SCHEDULE, **self.lineup.get("schedule", {})}
 
     def block(self, when=None):
-        hour = (when or datetime.now()).hour
-        night = hour >= self.lineup["night_starts"] or hour < self.lineup["night_ends"]
-        return "night" if night else "day"
+        """Late night, then prime time (from evening_starts until late night; none
+        if it's unset), daytime the rest."""
+        hour, night = (when or datetime.now()).hour, self.lineup["night_starts"]
+        if within(hour, night, self.lineup["night_ends"]):
+            return "night"
+        evening = self.lineup.get("evening_starts", night)
+        return "evening" if evening != night and within(hour, evening, night) else "day"
+
+    def pool(self, when):
+        """The block's shows, or the day's if the block has none."""
+        block = self.block(when)
+        return block if self.lineup.get(block) else "day"
 
     def off_air(self, when):
         sc = self.schedule()
@@ -312,7 +331,7 @@ class Station:
         features_from, and only cartoons on weekend mornings."""
         if not in_season(show, when):
             return False
-        if self.block(when) == "night":
+        if self.block(when) != "day":
             return True
         sc, kind = self.schedule(), self.kind(show)
         if kind == "feature" and when.hour < sc["features_from"]:
@@ -321,16 +340,19 @@ class Station:
             return kind == "cartoon"
         return True
 
-    def draw(self, pool, when, avoid=None, rules=True):
+    def draw(self, pool, when, avoid=None, rules=True, within_s=None):
         """The next show in a pool's shuffle that may start at `when`, never the
         same one twice running. Shows that don't fit yet stay in the shuffle for
-        later; a seasonal show goes in twice while it's in season."""
+        later; a seasonal show goes in twice while it's in season. With `within_s`,
+        only a show that long or shorter, or None."""
         shows = self.lineup.get(pool) or []
         if not shows:
             return None
         # commercials: their season, and their block if they have one (late-night spots)
         ok = (lambda s: self.fits(s, when)) if rules else (
             lambda s: in_season(s, when) and s.get("block", self.block(when)) == self.block(when))
+        if within_s is not None:
+            ok = (lambda base: lambda s: base(s) and self.length_of(s) <= within_s)(ok)
         bag = self.bags.setdefault(pool, [])
         bag[:] = [s for s in bag if s in shows]
         for refill in (False, True):
@@ -341,6 +363,8 @@ class Station:
             for i, show in enumerate(bag):
                 if ok(show) and (avoid is None or slug(show) != slug(avoid) or len(shows) == 1):
                     return bag.pop(i)
+        if within_s is not None:
+            return None
         return random.choice([s for s in shows if in_season(s, when)] or shows)
 
     def break_length(self):
@@ -353,36 +377,58 @@ class Station:
         anthem = self.durations.get(slug(ANTHEM), 190)
         return anthem + (8 if item["type"] == "signoff" else 6)
 
+    def next_slot(self, when):
+        """The first hour or half hour at or after `when`."""
+        base = when.replace(minute=0, second=0, microsecond=0)
+        return base + timedelta(seconds=-(-(when - base).total_seconds() // SLOT) * SLOT)
+
     def extend_plan(self, hours=3):
-        """Plan until `hours` from now. Call with the lock held."""
-        now = datetime.now()
+        """Plan until `hours` from now. Call with the lock held.
+
+        On the clock, a show that ends within fill_max minutes of the next hour or
+        half hour is followed by commercials until then, so the next one starts on
+        time; with more room than that, a short show that fits goes in first (from
+        the daytime list too in prime time), the way stations filled odd minutes."""
+        now, sc = datetime.now(), self.schedule()
         gap = self.break_length() + UP_NEXT
         if self.plan:
             last = self.plan[-1]
-            t = last["at"] + timedelta(seconds=self.item_length(last) + (gap if last["type"] == "show" else UP_NEXT))
+            end, after_show = last["at"] + timedelta(seconds=self.item_length(last)), last["type"] == "show"
+        elif self.now:
+            end, after_show = now + timedelta(seconds=max(0, self.length - self.pos)), True
         else:
-            t = now + timedelta(seconds=(max(0, self.length - self.pos) + gap if self.now else 0))
-        while t < now + timedelta(hours=hours) and len(self.plan) < 300:
+            end, after_show = now, False
+        while end < now + timedelta(hours=hours) and len(self.plan) < 300:
+            t = end + timedelta(seconds=gap if after_show else UP_NEXT)
             if self.off_air(t):
                 self.plan.append({"type": "signoff", "at": t})
-                t = self.sign_on_time(t)
-                self.plan.append({"type": "signon", "at": t})
-                t += timedelta(seconds=self.item_length(self.plan[-1]) + UP_NEXT)
+                self.plan.append({"type": "signon", "at": self.sign_on_time(t)})
+                end, after_show = self.plan[-1]["at"] + timedelta(seconds=self.item_length(self.plan[-1])), False
                 continue
             last = next((i["show"] for i in reversed(self.plan) if i["type"] == "show"), self.now)
-            pool = self.block(t) if self.lineup.get(self.block(t)) else "day"
-            show = self.draw(pool, t, avoid=last)
+            pool, show, fill = self.pool(t), None, False
+            if after_show and sc["on_the_clock"]:
+                slot = self.next_slot(end + timedelta(seconds=IDENT + UP_NEXT))
+                room = (slot - end).total_seconds()
+                if room - UP_NEXT <= sc["fill_max"] * 60:
+                    t, fill = slot, True
+                else:
+                    for p in (pool, "day") if self.block(t) == "evening" and pool != "day" else (pool,):
+                        show = self.draw(p, t, avoid=last, within_s=room - 2 * gap)
+                        if show:
+                            break
+            show = show or self.draw(self.pool(t), t, avoid=last)  # t may have moved to the next block
             if show is None:
                 break
-            self.plan.append({"type": "show", "show": show, "at": t})
-            t += timedelta(seconds=self.length_of(show) + gap)
+            self.plan.append({"type": "show", "show": show, "at": t, **({"fill": True} if fill else {})})
+            end, after_show = t + timedelta(seconds=self.length_of(show)), True
 
     def replan(self):
         """Start the plan over (it drifted, or the hours changed). Planned shows go
         back to the front of their shuffles, so none are lost. Lock held."""
         for item in reversed(self.plan):
             if item["type"] == "show":
-                pool = next((p for p in ("day", "night") if item["show"] in self.lineup.get(p, [])), None)
+                pool = next((p for p in POOLS if item["show"] in self.lineup.get(p, [])), None)
                 if pool:
                     self.bags.setdefault(pool, []).insert(0, item["show"])
         self.plan = []
@@ -444,6 +490,8 @@ class Station:
                 break
             if item["type"] == "signon":
                 t = max(t, item["at"])
+            elif item.get("fill"):  # on the clock: commercials until its time
+                t = max(t - timedelta(seconds=gap - IDENT - UP_NEXT), item["at"])
             row(item["type"], item.get("show"), t, self.item_length(item),
                 **({"title": "Sign-off: O Canada"} if item["type"] == "signoff" else
                    {"title": "Sign-on: O Canada"} if item["type"] == "signon" else {}))
@@ -487,10 +535,13 @@ class Station:
             audio_only = show["file"].lower().endswith((".mp3", ".ogg", ".flac", ".wav", ".m4a"))
             # 256 wide at CRF 28: the set gets 256x192 at 16 greys, so this looks the same
             # there at about half the size of the old 320/CRF 26 (a feature ~50 MB, not ~120)
+            # a spot cut from a reel of commercials: its start and end in the reel
+            cut = (["-ss", str(show["start"])] if show.get("start") else []) + \
+                  (["-to", str(show["end"])] if show.get("end") else [])
             shrink = ["-vn"] if audio_only else ["-vf", "scale=256:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
             r = subprocess.run(["nice", "-n", "19", "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
                                 "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
-                                "-i", url, *shrink, "-ac", "1", "-c:a", "aac", str(tmp)])
+                                *cut, "-i", url, *shrink, "-ac", "1", "-c:a", "aac", str(tmp)])
             if r.returncode == 0:
                 break
             tmp.unlink(missing_ok=True)
@@ -590,7 +641,7 @@ class Station:
         """Measure the shows cached before framing existed, in the background,
         and fetch the anthem if it isn't here yet."""
         self.fetch(ANTHEM)
-        for show in self.lineup["day"] + self.lineup["night"] + self.lineup.get("bumpers", []):
+        for show in self.everything():
             try:
                 with self.encoder:  # CPU-bound like a download: one at a time
                     self.frame_up(show)
@@ -664,18 +715,30 @@ class Station:
             raise Interrupted
         self.skip = False
 
-    def commercial_break(self):
+    def commercial_break(self, until=None):
         """'We'll be right back', then one or two commercials from the bumpers
-        list. One that isn't downloaded yet is fetched for next time."""
+        list, or with `until` (on the clock) as many as fit before then and the
+        station's card for the odd seconds left. One that isn't downloaded yet is
+        fetched for next time."""
+        bumpers = self.lineup.get("bumpers")
         n = BREAKS.get(self.schedule()["breaks"], 0)
-        ads = []
-        for _ in range(n if self.lineup.get("bumpers") else 0):
+        left = (until - datetime.now()).total_seconds() - IDENT - UP_NEXT if until else None
+        if not bumpers or (left is None and not n):
+            return
+        ads, tries = [], 0
+        while tries < 4 * len(bumpers) and (len(ads) < n if left is None else left >= 10):
+            tries += 1
             ad = self.draw("bumpers", datetime.now(), avoid=ads[-1] if ads else None, rules=False)
-            if ad and self.path(ad).exists():
-                ads.append(ad)
-            elif ad:
+            if not ad:
+                break
+            if not self.path(ad).exists():
                 threading.Thread(target=self.fetch, args=(ad,), daemon=True).start()
-        if not ads:
+            elif left is None:
+                ads.append(ad)
+            elif self.duration(ad) <= left:
+                ads.append(ad)
+                left -= self.duration(ad)
+        if not ads and (left is None or left > 60):  # nothing downloaded yet: don't sit on a card
             return
         self.now, self.pos, self.length = {"title": "Commercial break", "special": "break"}, 0, 0
         self.segment(lambda: self.hold(channel_card(("WE'LL BE RIGHT BACK", 16, 230), ("after these messages", 12, 170)),
@@ -683,6 +746,11 @@ class Station:
         for ad in ads:
             self.now, self.pos = {**ad, "special": "commercial"}, 0
             self.segment(lambda: self.play(ad, self.path(ad), resumable=False))
+        if until:  # the odd seconds left, a minute at most (the show starts early rather than wait longer)
+            self.now, self.pos = {"title": "Station break", "special": "break"}, 0
+            stop = min(until - timedelta(seconds=UP_NEXT), datetime.now() + timedelta(seconds=60))
+            self.segment(lambda: self.hold(channel_card(("YOU'RE WATCHING", 13, 170), ("CHANNEL 4", 20, 230)),
+                                           until=lambda: datetime.now() >= stop or self.interrupted()))
 
     def anthem(self):
         """O Canada over the flag, if it's downloaded (fetched for next time if not)."""
@@ -760,6 +828,7 @@ class Station:
                 start_at = 0.0
                 if current is None and self.resume and self.mode == "lineup":
                     current, start_at, self.resume = self.resume["show"], float(self.resume["pos"]), None
+                item = None
                 if current is None:
                     item = self.next_item()
                     if item is None:
@@ -778,7 +847,7 @@ class Station:
                     threading.Thread(target=self.fetch, args=(self.upcoming,), daemon=True).start()
                 if played and not start_at:
                     played = False
-                    self.commercial_break()
+                    self.commercial_break(until=item["at"] if item and item.get("fill") else None)
                 self.now, self.pos, self.length = current, start_at, self.duration(current)
                 if not self.path(current).exists():  # first time: stand by while it downloads
                     done = threading.Event()
@@ -822,7 +891,7 @@ class Station:
                     "length": round(self.durations.get(slug(s), 0))}
         lineup = {k: [{**show(s), "kind": self.kind(s), "kind_set": "kind" in s, "season": s.get("season", "")}
                       for s in self.lineup.get(k, [])]
-                  for k in ("day", "night", "bumpers")}
+                  for k in (*POOLS, "bumpers")}
         upcoming = self.peek()
         disk = shutil.disk_usage(CLIPS)  # where downloads go
         link = self.tv.stats
@@ -836,8 +905,11 @@ class Station:
                 "lineup": {**self.lineup, **lineup}, "fetching": sorted(self.fetching), "bulk": self.bulk,
                 "clock": datetime.now().strftime("%H:%M")}
 
+    def everything(self):
+        return [s for k in (*POOLS, "bumpers") for s in self.lineup.get(k, [])]
+
     def find(self, key):
-        for s in self.lineup.get("day", []) + self.lineup.get("night", []) + self.lineup.get("bumpers", []):
+        for s in self.everything():
             if slug(s) == key:
                 return s
         return None
@@ -860,18 +932,27 @@ class Station:
                 sc[k] = bool(v)
             elif k == "breaks":
                 sc[k] = v if v in BREAKS else sc[k]
+            elif k == "on_the_clock":
+                sc[k] = bool(v)
+            elif k == "fill_max":
+                sc[k] = max(0, min(20, int(v)))
             elif k in DEFAULT_SCHEDULE:
                 sc[k] = int(v) % 24
-        clean = {"day": [], "night": [], "bumpers": [], "night_starts": int(lineup["night_starts"]) % 24,
+        night = int(lineup["night_starts"]) % 24
+        clean = {**{k: [] for k in (*POOLS, "bumpers")}, "night_starts": night,
+                 "evening_starts": int(lineup.get("evening_starts", night)) % 24,
                  "night_ends": int(lineup["night_ends"]) % 24, "schedule": sc}
-        for block in ("day", "night", "bumpers"):
+        for block in (*POOLS, "bumpers"):
             for s in lineup.get(block, []):
                 show = {"title": str(s["title"]), "year": s.get("year") or "", "item": str(s["item"]), "file": str(s["file"])}
                 if s.get("kind") in KINDS:
                     show["kind"] = s["kind"]
                 if s.get("season") in SEASONS:
                     show["season"] = s["season"]
-                if block == "bumpers" and s.get("block") in ("day", "night"):
+                for k in ("start", "end"):  # a spot cut from a reel
+                    if s.get(k):
+                        show[k] = round(float(s[k]), 2)
+                if block == "bumpers" and s.get("block") in POOLS:
                     show["block"] = s["block"]  # a commercial for one block only
                 clean[block].append(show)
         with self.lock:
@@ -926,7 +1007,7 @@ class Station:
         """Fetch every show not yet cached: the queue, or ("all") the queue and the whole lineup."""
         if self.bulk and self.bulk["running"]:
             return
-        everything = self.lineup["day"] + self.lineup["night"] + self.lineup.get("bumpers", []) + [ANTHEM]
+        everything = self.everything() + [ANTHEM]
         shows = list(self.queue) + ([] if scope == "queue" else everything)
         todo, seen = [], set()
         for show in shows:
