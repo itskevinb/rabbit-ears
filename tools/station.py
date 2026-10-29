@@ -709,7 +709,10 @@ class Station:
             shrink = ["-vn"] if audio_only else ["-vf", "scale=256:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
             r = subprocess.run(["nice", "-n", "19", "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
                                 "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
-                                *cut, "-i", url, *shrink, "-ac", "1", "-c:a", "aac", str(tmp)])
+                                # two cores at most: x264 takes them all otherwise, and nice alone
+                                # didn't keep playback smooth (a 1080p source had the box at load 12)
+                                "-threads", "2", *cut, "-i", url, *shrink, "-threads", "2", "-filter_threads", "1",
+                                "-ac", "1", "-c:a", "aac", str(tmp)])
             if r.returncode == 0:
                 break
             tmp.unlink(missing_ok=True)
