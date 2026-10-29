@@ -59,6 +59,11 @@ ANTHEM = {"title": "O Canada", "year": 1913, "item": "OCanada_284", "file": "OCa
 IDENT, UP_NEXT = 4, 5  # seconds: "we'll be right back" before commercials, "up next" before a show
 SLOT = 30 * 60         # on the clock, shows start on the hour and the half hour
 CHANNEL_CARD = 3       # seconds of the channel's card when you switch to it
+# Stills go out no brighter than this. The set takes its sound from the beat between
+# the picture and sound carriers, and white is the weakest picture carrier (negative
+# AM): a still card with big white areas and no soundtrack to cover it buzzed.
+CARD_WHITE = 160
+DIM = bytes(min(v, CARD_WHITE) for v in range(256))
 # The board takes at most 800 audio samples a packet (AUD_MAX), so at 15625 Hz
 # nothing may go out under 20 fps: a 15 fps show sent as-is had every packet
 # thrown away (frozen picture, no sound).
@@ -811,7 +816,7 @@ class Station:
     def hold(self, gray, seconds=None, until=None):
         """Send a still frame (with silence) for a while, or until `until()` says stop."""
         fps = self.settings["fps"]
-        n = 0
+        gray, n = gray.translate(DIM), 0
         while (seconds is None or n < seconds * fps) and not (until and until()):
             self.send(gray, bytes([SILENCE]) * audio_share(n, fps))
             n += 1
