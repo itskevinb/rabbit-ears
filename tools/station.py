@@ -707,12 +707,12 @@ class Station:
             time.sleep(wait)
             print(f"fetching {show['title']}" + (f" (try {attempt + 1})" if attempt else ""), flush=True)
             audio_only = show["file"].lower().endswith((".mp3", ".ogg", ".flac", ".wav", ".m4a"))
-            # 256 wide at CRF 28: the set gets 256x192 at 16 greys, so this looks the same
-            # there at about half the size of the old 320/CRF 26 (a feature ~50 MB, not ~120)
+            # the board's width at CRF 23: CRF 28 at 256 wide broke into blocks on movement
+            # from the low-bitrate TV uploads (a feature ~90 MB; the share has room)
             # a spot cut from a reel of commercials: its start and end in the reel
             cut = (["-ss", str(show["start"])] if show.get("start") else []) + \
                   (["-to", str(show["end"])] if show.get("end") else [])
-            shrink = ["-vn"] if audio_only else ["-vf", "scale=256:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
+            shrink = ["-vn"] if audio_only else ["-vf", f"scale={W}:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
             r = subprocess.run([*pinned(), "nice", "-n", "19", "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
                                 "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
                                 # two cores at most (and pinned, above): x264 takes them all otherwise,
@@ -862,7 +862,8 @@ class Station:
             framing = self.framing.get(slug(show)) or {}
             source = Source.file(path, start, fps=fps, brightness=s["brightness"], contrast=s["contrast"],
                                  cleanup=s["cleanup"], crop=framing.get("crop"), fill=framing.get("fill", False),
-                                 smooth=s["smooth"], blend=s["blend"] and bool(own) and own > fps and own % fps != 0,
+                                 smooth=s["smooth"], decimate=own == 30 and fps == 24,
+                                 blend=s["blend"] and bool(own) and own > fps and own % fps != 0,
                                  rows=self.rows)
             n = 0
             try:
