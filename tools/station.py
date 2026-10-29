@@ -1208,6 +1208,7 @@ class Station:
                 seen.add(slug(show))
                 todo.append(show)
         self.bulk = {"scope": scope, "total": len(todo), "done": 0, "failed": [], "running": True, "current": None}
+        save("bulk.json", {"scope": scope})  # a restart carries on with it
 
         def work():
             for show in todo:  # one at a time, so playback keeps its CPU
@@ -1218,6 +1219,7 @@ class Station:
                     self.bulk["failed"].append(show["title"])
                 self.bulk["done"] += 1
             self.bulk["running"], self.bulk["current"] = False, None
+            save("bulk.json", None)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1338,5 +1340,7 @@ port = int(flags.get("--port") or 80)
 server = ThreadingHTTPServer(("0.0.0.0", port), Remote)  # bind first: a refused port stops us before we touch the TV
 threading.Thread(target=station.run, daemon=True).start()
 threading.Thread(target=station.frame_up_all, daemon=True).start()
+if load("bulk.json", None):  # a "download all" the last run didn't finish
+    station.download(load("bulk.json", None)["scope"])
 print(f"remote on http://0.0.0.0:{port}/", flush=True)
 server.serve_forever()
