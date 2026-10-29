@@ -256,9 +256,10 @@
       <label>Highest frame rate: <b id="fpsV"></b> fps</label><input type="range" id="fps" min="20" max="30" step="1">
       <label>Brightness: <b id="brightnessV"></b></label><input type="range" id="brightness" min="-0.5" max="0.5" step="0.05">
       <label>Contrast: <b id="contrastV"></b></label><input type="range" id="contrast" min="0.3" max="3" step="0.05">
-      <label>Vertical linearity: <b id="linearityV"></b></label><input type="range" id="linearity" min="-0.4" max="0.4" step="0.02">
+      <label>Vertical linearity: <b id="linearityV"></b></label><input type="range" id="linearity" min="-1" max="1" step="0.05">
       <p class="note">Old tubes spread the lines at the top of the screen further apart than at the bottom. Put up the
-        test pattern and slide this until its circle is round: right squeezes the top, left the bottom. It changes as you slide.</p>
+        test pattern and slide this until its circle is round: right squeezes the top half, left the bottom half; the
+        other half stays as it is. The lines it frees go out black at that edge. It changes as you slide.</p>
       <div class="grid2">
         <div><label for="sound">Sound method</label>
           <select id="sound">

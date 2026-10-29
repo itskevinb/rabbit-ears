@@ -85,12 +85,22 @@ def ulaw_encode(x):
 
 
 def row_map(k):
-    """Which picture row each scan line shows, to undo a tube's uneven vertical sweep:
-    k > 0 squeezes the top (where an old set spreads its lines out) and stretches the
-    bottom to match; 0 leaves the picture alone. A quadratic: the ends stay put."""
+    """Which picture row each scan line shows (None: black), to undo a tube's uneven
+    vertical sweep, one half at a time: k > 0 squeezes the top half (an old set that
+    spreads its top lines out), harder toward the edge, and leaves the bottom half
+    alone; k < 0 does the same to the bottom. The lines freed at that edge go out
+    black (usually behind the bezel). 0 leaves the picture alone."""
     if not k:
         return None
-    return [min(H - 1, max(0, round((t + k * t * (1 - t)) * (H - 1)))) for t in (y / (H - 1) for y in range(H))]
+    rows = []
+    for y in range(H):
+        t = y / (H - 1)
+        u = 0.5 - t if k > 0 else t - 0.5  # distance into the half being squeezed
+        if u > 0:
+            off = u * (1 + abs(k) * 2 * u)
+            t = 0.5 - off if k > 0 else 0.5 + off
+        rows.append(round(t * (H - 1)) if 0 <= t <= 1 else None)
+    return rows
 
 
 def volume_table(volume):
@@ -823,7 +833,7 @@ class Station:
         elif self.settings["volume"] < 100:
             mulaw = mulaw.translate(self.volume_lut)
         if self.rows:  # vertical linearity: pick the rows the tube will spread evenly
-            gray = b"".join(gray[r * W:(r + 1) * W] for r in self.rows)
+            gray = b"".join(gray[r * W:(r + 1) * W] if r is not None else bytes(W) for r in self.rows)
         self.tv.send(packet(gray, mulaw))
         self.frame = gray
 
@@ -1170,7 +1180,7 @@ class Station:
         s["match_fps"] = bool(new.get("match_fps", s["match_fps"]))
         s["smooth"] = bool(new.get("smooth", s["smooth"]))
         s["blend"] = bool(new.get("blend", s["blend"]))
-        s["linearity"] = max(-0.4, min(0.4, float(new.get("linearity", s["linearity"]))))
+        s["linearity"] = max(-1.0, min(1.0, float(new.get("linearity", s["linearity"]))))
         self.rows = row_map(s["linearity"])
         s["sound"] = new.get("sound", s["sound"]) if new.get("sound") in SOUND_METHODS else s["sound"]
         s["dither"] = bool(new.get("dither", s["dither"]))
