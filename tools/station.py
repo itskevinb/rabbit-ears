@@ -691,12 +691,15 @@ class Station:
                 self.fetching.discard(key)
 
     def fetch_next(self, show):
-        """Fetch the show coming up, ahead of a "download all" (which waits for it)."""
-        if self.path(show).exists():
+        """Fetch the show coming up, ahead of a "download all" (which waits for it), or
+        fetch it again if it came at an older quality (it airs from the old copy if the
+        new one isn't in by then)."""
+        again = self.path(show).exists()
+        if again and not self.old_encode(show):
             return
         self.urgent.add(slug(show))
         try:
-            self.fetch(show)
+            self.fetch(show, again=again)
         finally:
             self.urgent.discard(slug(show))
 
