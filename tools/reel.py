@@ -2,8 +2,8 @@
 
     python3 tools/reel.py <archive.org item> <file> [--out=DIR] [--min=8] [--max=150]
 
-Downloads a small copy of the reel (256 px wide), finds the black frames between
-spots, and writes to DIR (default ./reels/<item>):
+Downloads a small copy of the reel (256 px wide), finds the gaps between spots
+(black frames, or on a tape with none, a short silence at a hard cut), and writes to DIR (default ./reels/<item>):
 
   spots.json   one lineup entry per spot: {"title", "item", "file", "start", "end"}
   sheet.png    a contact sheet, one numbered frame from the middle of each spot,
@@ -39,10 +39,18 @@ length = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "forma
                                str(small)], capture_output=True, text=True).stdout)
 r = subprocess.run(["ffmpeg", "-nostdin", "-i", str(small), "-vf", "blackdetect=d=0.08:pic_th=0.95:pix_th=0.12",
                     "-an", "-f", "null", "-"], capture_output=True, text=True)
-blacks = [(float(a), float(b)) for a, b in re.findall(r"black_start:([\d.]+) black_end:([\d.]+)", r.stderr)]
+gaps = [(float(a) + float(b)) / 2 for a, b in re.findall(r"black_start:([\d.]+) black_end:([\d.]+)", r.stderr)]
+if len(gaps) < length / 120:  # hardly any black (an off-air tape): silences that line up with a hard cut
+    r = subprocess.run(["ffmpeg", "-nostdin", "-i", str(small), "-vf", "select='gt(scene,0.3)',showinfo",
+                        "-af", "silencedetect=n=-40dB:d=0.2", "-f", "null", "-"], capture_output=True, text=True)
+    scenes = [float(t) for t in re.findall(r"pts_time:([\d.]+)", r.stderr)]
+    quiet = list(zip(map(float, re.findall(r"silence_start: ([\d.]+)", r.stderr)),
+                     map(float, re.findall(r"silence_end: ([\d.]+)", r.stderr))))
+    gaps = [next(t for t in scenes if a - 0.5 <= t <= b + 0.5) for a, b in quiet
+            if any(a - 0.5 <= t <= b + 0.5 for t in scenes)]
 
-# cut in the middle of each black gap; a long black stretch is a gap of its own
-cuts = [0.0] + [(a + b) / 2 for a, b in blacks if 0.5 < (a + b) / 2 < length - 0.5] + [length]
+# cut at each gap
+cuts = [0.0] + sorted(t for t in gaps if 0.5 < t < length - 0.5) + [length]
 spots = []
 for a, b in zip(cuts, cuts[1:]):
     if spots and b - a < MIN:
