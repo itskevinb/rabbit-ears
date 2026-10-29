@@ -58,6 +58,7 @@ SEASONS = {"halloween": ((10, 1), (10, 31)), "christmas": ((12, 1), (12, 26))}
 ANTHEM = {"title": "O Canada", "year": 1913, "item": "OCanada_284", "file": "OCanada.mp3"}
 IDENT, UP_NEXT = 4, 5  # seconds: "we'll be right back" before commercials, "up next" before a show
 SLOT = 30 * 60         # on the clock, shows start on the hour and the half hour
+CHANNEL_CARD = 3       # seconds of the channel's card when you switch to it
 # The board takes at most 800 audio samples a packet (AUD_MAX), so at 15625 Hz
 # nothing may go out under 20 fps: a 15 fps show sent as-is had every packet
 # thrown away (frozen picture, no sound).
@@ -965,9 +966,9 @@ class Station:
                     if current is None and self.queue:
                         current = self.queue.pop(0)
                         save("queue.json", self.queue)
-                start_at = 0.0
+                start_at, switched = 0.0, False
                 if self.tuned:  # a new channel: join what's on (the queue still goes first)
-                    self.tuned = False
+                    self.tuned, switched = False, True
                     self.resume = None
                     if current is None:
                         current, start_at = self.tune_in()
@@ -998,6 +999,14 @@ class Station:
                 self.now, self.pos, self.length = current, start_at, self.duration(current)
                 # when it started (or would have), so leaving the channel and coming back finds it still on
                 self.started = datetime.now() - timedelta(seconds=start_at)
+                if switched and start_at and self.path(current).exists():
+                    # joining part way: the channel's card first (a new show gets it with "up
+                    # next"), while the show runs on behind it
+                    self.hold(channel_card(("NOW SHOWING", 12, 170), (current["title"], 14, 230)),
+                              seconds=CHANNEL_CARD, until=self.interrupted)
+                    if self.interrupted():
+                        raise Interrupted
+                    start_at = self.pos = start_at + CHANNEL_CARD
                 if not self.path(current).exists():  # first time: stand by while it downloads
                     done = threading.Event()
                     threading.Thread(target=lambda: (self.fetch(current), done.set()), daemon=True).start()
