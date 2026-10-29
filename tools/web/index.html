@@ -145,6 +145,12 @@
       <input type="range" id="volume" min="0" max="100" step="5">
     </section>
 
+    <section>
+      <h2>Era</h2>
+      <div class="tabs" id="eras"></div>
+      <p class="note">Pick one or more decades, or none for everything. Shows and commercials come from those years; a block with nothing from them plays the daytime ones.</p>
+    </section>
+
     <section id="queueBox" style="display:none">
       <h2>Playing next</h2>
       <ul id="queue"></ul>
@@ -354,7 +360,7 @@ function render() {
   m.textContent = {lineup: 'On the air', standby: 'Standing by', testcard: 'Test pattern', off: 'Off the air'}[s.mode];
   m.className = 'badge ' + {lineup: 'on', standby: 'warn', testcard: 'warn', off: 'off'}[s.mode];
   for (const el of document.querySelectorAll('.bulk')) el.textContent = bulkText(s.bulk);
-  if (page === 'now') renderNow();
+  if (page === 'now') { renderNow(); renderEras(); }
   if (page === 'guide') loadGuide();
   if (page === 'lineup') renderLineup();
   if (page === 'downloads') renderDownloads();
@@ -414,6 +420,15 @@ function renderGuide(rows) {
   }).join('');
   setHTML($('guideList'), html || '<li><span></span><span class="name"><small>Nothing planned.</small></span></li>');
 }
+
+function renderEras() {
+  const on = state.schedule.eras || [];
+  setHTML($('eras'), `<button class="${on.length ? '' : 'active'}" onclick="setEras([])">All</button>` +
+    Object.entries(state.eras || {}).map(([e, n]) =>
+      `<button class="${on.includes(+e) ? 'active' : ''}" onclick="toggleEra(${e})">${String(e).slice(2)}s <small>${n}</small></button>`).join(''));
+}
+function toggleEra(e) { const on = state.schedule.eras || []; setEras(on.includes(e) ? on.filter(x => x !== e) : [...on, e]); }
+function setEras(eras) { saveSchedule({eras}, eras.length ? 'Era: ' + eras.sort().map(e => `'${String(e).slice(2)}s`).join(' + ') : 'All eras'); }
 
 // ---- Lineup ----
 function renderLineup() {

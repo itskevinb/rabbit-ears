@@ -46,7 +46,9 @@ DEFAULT_SCHEDULE = {"cartoon_mornings": True, "mornings_from": 7, "mornings_to":
                     "features_from": 12,                                 # daytime features wait for the afternoon
                     "off_air": True, "sign_off": 1, "sign_on": 6,        # O Canada, then the test pattern overnight
                     "breaks": "light",                                   # commercials between shows
-                    "on_the_clock": True, "fill_max": 10}                # shows start on the hour and half hour
+                    "on_the_clock": True, "fill_max": 10,                # shows start on the hour and half hour
+                    "eras": []}                                          # decades to play (1960, ...); none: all
+ERAS = (1920, 1930, 1940, 1950, 1960, 1970)
 BREAKS = {"off": 0, "light": 1, "classic": 2}
 POOLS = ("day", "evening", "night")  # the blocks shows are drawn from; "bumpers" are the commercials
 KINDS = ("cartoon", "short", "episode", "feature")
@@ -98,6 +100,12 @@ def save(name, data):
 
 def slug(show):
     return "".join(c if c.isalnum() else "-" for c in show["title"].lower()).strip("-")
+
+
+def decade(show):
+    """1962 -> 1960; None when the show has no year."""
+    m = re.match(r"\d{4}", str(show.get("year") or ""))
+    return int(m.group()) // 10 * 10 if m else None
 
 
 def within(hour, start, end):
@@ -300,9 +308,19 @@ class Station:
         evening = self.lineup.get("evening_starts", night)
         return "evening" if evening != night and within(hour, evening, night) else "day"
 
+    def in_era(self, show):
+        """Is the show from one of the chosen decades? With none chosen, or no year
+        on the show, yes."""
+        eras = self.schedule()["eras"]
+        return not eras or decade(show) is None or decade(show) in eras
+
     def pool(self, when):
-        """The block's shows, or the day's if the block has none."""
+        """The block's shows, or the day's if the block has none from the chosen
+        decades (prime time in the 1930s: the 1930s daytime shows)."""
         block = self.block(when)
+        for p in (block, "day"):
+            if any(self.in_era(s) for s in self.lineup.get(p, [])):
+                return p
         return block if self.lineup.get(block) else "day"
 
     def off_air(self, when):
@@ -346,6 +364,7 @@ class Station:
         later; a seasonal show goes in twice while it's in season. With `within_s`,
         only a show that long or shorter, or None."""
         shows = self.lineup.get(pool) or []
+        shows = [s for s in shows if self.in_era(s)] or shows  # the chosen decades, if the pool has any
         if not shows:
             return None
         # commercials: their season, and their block if they have one (late-night spots)
@@ -905,7 +924,8 @@ class Station:
                 "queue": [show(q) for q in self.queue],
                 "pos": round(self.pos), "length": round(self.length), "settings": self.settings,
                 "lineup": {**self.lineup, **lineup}, "fetching": sorted(self.fetching), "bulk": self.bulk,
-                "clock": datetime.now().strftime("%H:%M")}
+                "clock": datetime.now().strftime("%H:%M"),
+                "eras": {e: sum(decade(s) == e for p in POOLS for s in self.lineup.get(p, [])) for e in ERAS}}
 
     def everything(self):
         return [s for k in (*POOLS, "bumpers") for s in self.lineup.get(k, [])]
@@ -936,6 +956,8 @@ class Station:
                 sc[k] = v if v in BREAKS else sc[k]
             elif k == "on_the_clock":
                 sc[k] = bool(v)
+            elif k == "eras":
+                sc[k] = sorted({int(e) for e in v} & set(ERAS)) if isinstance(v, list) else []
             elif k == "fill_max":
                 sc[k] = max(0, min(20, int(v)))
             elif k in DEFAULT_SCHEDULE:
