@@ -276,6 +276,7 @@ class Station:
         self.frame = channel_card()      # last grey frame sent, for the thumbnail
         self.pos = self.length = 0.0     # seconds into / length of the current show
         self.fetching = set()
+        self.urgent = set()              # the next show's download, which goes ahead of a "download all"
         self.encoder = threading.Lock()  # one download at a time: shrinking is CPU-bound, and playback needs a core
         self.durations = load("durations.json", {})
         self.framing = load("framing.json", {})  # slug -> {"crop", "fill"}: black bars to cut, zoom to fill
@@ -543,6 +544,16 @@ class Station:
         finally:
             with self.lock:
                 self.fetching.discard(key)
+
+    def fetch_next(self, show):
+        """Fetch the show coming up, ahead of a "download all" (which waits for it)."""
+        if self.path(show).exists():
+            return
+        self.urgent.add(slug(show))
+        try:
+            self.fetch(show)
+        finally:
+            self.urgent.discard(slug(show))
 
     def _fetch(self, show, out):
         """Download and shrink, at the lowest CPU priority so playback never stutters."""
@@ -865,7 +876,7 @@ class Station:
                 self.now, self.pos, self.length = current, start_at, self.duration(current)
                 self.upcoming = self.peek()
                 if self.upcoming:
-                    threading.Thread(target=self.fetch, args=(self.upcoming,), daemon=True).start()
+                    threading.Thread(target=self.fetch_next, args=(self.upcoming,), daemon=True).start()
                 if played and not start_at:
                     played = False
                     self.commercial_break(until=item["at"] if item and item.get("fill") else None)
@@ -1031,7 +1042,10 @@ class Station:
         """Fetch every show not yet cached: the queue, or ("all") the queue and the whole lineup."""
         if self.bulk and self.bulk["running"]:
             return
-        everything = self.everything() + [ANTHEM]
+        # what's planned first, then the commercials (small, and they make the breaks), then the rest
+        with self.lock:
+            planned = [i["show"] for i in self.plan if i["type"] == "show"]
+        everything = planned + [ANTHEM] + self.lineup.get("bumpers", []) + self.everything()
         shows = list(self.queue) + ([] if scope == "queue" else everything)
         todo, seen = [], set()
         for show in shows:
@@ -1042,6 +1056,8 @@ class Station:
 
         def work():
             for show in todo:  # one at a time, so playback keeps its CPU
+                while self.urgent:  # the next show on the air comes first
+                    time.sleep(1)
                 self.bulk["current"] = show["title"]
                 if self.fetch(show) is None:
                     self.bulk["failed"].append(show["title"])
