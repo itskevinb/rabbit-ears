@@ -378,6 +378,7 @@ class Station:
                 self.tuned = True
                 self.settings = {**self.settings, "channel": ch}
                 save("settings.json", self.settings)
+                save("now.json", None)  # a restart picks up the new channel, not the show we left
         self.set_mode("lineup")
         return True
 
