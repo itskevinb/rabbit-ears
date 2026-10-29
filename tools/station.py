@@ -103,6 +103,12 @@ def row_map(k):
     return rows
 
 
+def pinned():
+    """taskset to the last two CPUs we may use, for downloads ([] without taskset)."""
+    cpus = sorted(os.sched_getaffinity(0))
+    return ["taskset", "-c", ",".join(map(str, cpus[-2:]))] if shutil.which("taskset") and len(cpus) > 2 else []
+
+
 def volume_table(volume):
     """A bytes.translate table that scales mu-law audio; 0-100 on a squared
     curve, so the slider feels even."""
@@ -707,10 +713,10 @@ class Station:
             cut = (["-ss", str(show["start"])] if show.get("start") else []) + \
                   (["-to", str(show["end"])] if show.get("end") else [])
             shrink = ["-vn"] if audio_only else ["-vf", "scale=256:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
-            r = subprocess.run(["nice", "-n", "19", "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
+            r = subprocess.run([*pinned(), "nice", "-n", "19", "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-reconnect", "1",
                                 "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
-                                # two cores at most: x264 takes them all otherwise, and nice alone
-                                # didn't keep playback smooth (a 1080p source had the box at load 12)
+                                # two cores at most (and pinned, above): x264 takes them all otherwise,
+                                # and nice alone didn't keep playback smooth (the box sat at load 12)
                                 "-threads", "2", *cut, "-i", url, *shrink, "-threads", "2", "-filter_threads", "1",
                                 "-ac", "1", "-c:a", "aac", str(tmp)])
             if r.returncode == 0:
