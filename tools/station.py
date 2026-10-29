@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-from tvlink import CLEANUP, H, RATE, SILENCE, SOUND_METHODS, W, Source, TV, audio_share, cmd, packet, setup_commands
+from tvlink import CLEANUP, H, RATE, SILENCE, SOUND_METHODS, W, Source, TV, audio_share, cmd, packet, remap, setup_commands
 
 HERE = Path(__file__).resolve().parent
 CACHE = Path(os.environ.get("CHANNEL4_CACHE", HERE.parent / "cache"))
@@ -841,15 +841,14 @@ class Station:
             mulaw = bytes([SILENCE]) * len(mulaw)
         elif self.settings["volume"] < 100:
             mulaw = mulaw.translate(self.volume_lut)
-        if self.rows:  # vertical linearity: pick the rows the tube will spread evenly
-            gray = b"".join(gray[r * W:(r + 1) * W] if r is not None else bytes(W) for r in self.rows)
         self.tv.send(packet(gray, mulaw))
         self.frame = gray
 
     def hold(self, gray, seconds=None, until=None):
         """Send a still frame (with silence) for a while, or until `until()` says stop."""
         fps = self.settings["fps"]
-        gray, n = gray.translate(DIM), 0
+        # vertical linearity (shows get it in Source, before their dither)
+        gray, n = remap(gray.translate(DIM), self.rows), 0
         while (seconds is None or n < seconds * fps) and not (until and until()):
             self.send(gray, bytes([SILENCE]) * audio_share(n, fps))
             n += 1
@@ -863,7 +862,8 @@ class Station:
             framing = self.framing.get(slug(show)) or {}
             source = Source.file(path, start, fps=fps, brightness=s["brightness"], contrast=s["contrast"],
                                  cleanup=s["cleanup"], crop=framing.get("crop"), fill=framing.get("fill", False),
-                                 smooth=s["smooth"], blend=s["blend"] and bool(own) and own > fps and own % fps != 0)
+                                 smooth=s["smooth"], blend=s["blend"] and bool(own) and own > fps and own % fps != 0,
+                                 rows=self.rows)
             n = 0
             try:
                 for gray, mulaw in source:
@@ -940,7 +940,7 @@ class Station:
         s, fps = self.settings, self.settings["fps"]
         self.length, self.pos = self.duration(ANTHEM), 0
         source = Source(["-loop", "1", "-framerate", str(fps), "-i", str(self.flag)], ["-i", str(path)], fps=fps,
-                        duration=self.length, cleanup=s["cleanup"], smooth=s["smooth"])
+                        duration=self.length, cleanup=s["cleanup"], smooth=s["smooth"], rows=self.rows)
         try:
             for n, (gray, mulaw) in enumerate(source, 1):
                 self.send(gray, mulaw)
@@ -1196,7 +1196,8 @@ class Station:
         s["brightness"] = max(-0.5, min(0.5, float(new.get("brightness", s["brightness"]))))
         s["contrast"] = max(0.3, min(3.0, float(new.get("contrast", s["contrast"]))))
         s["cleanup"] = new.get("cleanup", s["cleanup"]) if new.get("cleanup") in CLEANUP else s["cleanup"]
-        picture = any(s[k] != self.settings[k] for k in ("fps", "match_fps", "smooth", "blend", "brightness", "contrast", "cleanup"))  # reopen the source
+        picture = any(s[k] != self.settings[k] for k in ("fps", "match_fps", "smooth", "blend", "brightness", "contrast",
+                                                         "cleanup", "linearity"))  # reopen the source
         board = any(s[k] != self.settings[k] for k in ("sound", "dither"))
         self.settings = s
         save("settings.json", s)

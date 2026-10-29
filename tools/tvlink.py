@@ -43,6 +43,11 @@ def dither(gray):
     return bytes(out)
 
 
+def remap(gray, rows):
+    """The frame with its rows rearranged (None: a black row), or as is without rows."""
+    return b"".join(gray[r * W:(r + 1) * W] if r is not None else bytes(W) for r in rows) if rows else gray
+
+
 def pack(gray):
     """8-bit grey, W*H bytes -> 4-bit, two pixels per byte, left pixel high.
     (C-speed bytes ops: a per-pixel Python loop can't keep up at 256x192.)"""
@@ -105,10 +110,10 @@ class Source:
     """A clip decoded to frames: iterate for (grey frame, mu-law audio) pairs."""
 
     def __init__(self, inputs_video, inputs_audio, fps, brightness=0.0, contrast=1.0, duration=None, cleanup="strong",
-                 crop=None, fill=False, smooth=False, blend=False):
+                 crop=None, fill=False, smooth=False, blend=False, rows=None):
         limit = ["-t", str(duration)] if duration else []
         base = ["ffmpeg", "-nostdin", "-loglevel", "error"]
-        self.fps, self.smooth = fps, smooth
+        self.fps, self.smooth, self.rows = fps, smooth, rows  # rows: see remap()
         # stderr off: cutting a clip short (skip, play now) makes ffmpeg complain about the closed pipe
         self.video = subprocess.Popen([*base, *inputs_video, *limit, "-vf", video_filter(fps, brightness, contrast, crop, fill, blend),
                                        "-an", "-f", "rawvideo", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -129,6 +134,9 @@ class Source:
             if len(gray) < W * H:
                 return
             want = audio_share(n, self.fps)
+            # rows rearranged before the dither: its pattern repeats every 4 rows, and
+            # rearranging after broke it up into crawling lines
+            gray = remap(gray, self.rows)
             yield dither(gray) if self.smooth else gray, self.audio.stdout.read(want).ljust(want, bytes([SILENCE]))
             n += 1
 
