@@ -666,10 +666,11 @@ class Station:
         local = CACHE / f"{slug(show)}.mp4"
         return local if CLIPS == CACHE or local.exists() else CLIPS / f"{slug(show)}.mp4"
 
-    def fetch(self, show):
-        """Download and shrink a show into the cache, once."""
-        out = self.path(show)
-        if out.exists():
+    def fetch(self, show, again=False):
+        """Download and shrink a show into the cache, once (`again`: once more, at the
+        current quality, into CLIPS; the old copy plays until the new one is in)."""
+        out = CLIPS / f"{slug(show)}.mp4" if again else self.path(show)
+        if out.exists() and not again:
             return out
         key = slug(show)
         with self.lock:
@@ -725,10 +726,30 @@ class Station:
         else:
             print(f"fetch failed: {show['title']}", flush=True)
             return None
-        tmp.rename(out)
+        try:
+            tmp.replace(out)
+        except OSError as e:  # the share wouldn't swap a file that's playing: keep the old one
+            print(f"couldn't swap in {show['title']}: {e}", flush=True)
+            tmp.unlink(missing_ok=True)
+            return out
+        local = CACHE / out.name
+        if local != out and local.exists():  # an old copy in the cache would be played first
+            local.unlink()
+        key = slug(show)
+        self.durations.pop(key, None)  # measured again from the new file: its bars and size differ
+        self.framing.pop(key, None)
         self.duration(show)
         self.frame_up(show)
         return out
+
+    def old_encode(self, show):
+        """Downloaded before downloads came at the board's width (256 or 320 wide, CRF 26-28)?"""
+        path = self.path(show)
+        if not path.exists():
+            return False
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width",
+                            "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+        return r.stdout.strip().isdigit() and int(r.stdout) != W
 
     def duration(self, show):
         key = slug(show)
@@ -1230,7 +1251,8 @@ class Station:
             save("queue.json", self.queue)
 
     def download(self, scope):
-        """Fetch every show not yet cached: the queue, or ("all") the queue and the whole lineup."""
+        """Fetch every show not yet cached: the queue, or ("all") the queue and the whole lineup,
+        then ("all") fetch again, at the current quality, what was downloaded at an older one."""
         if self.bulk and self.bulk["running"]:
             return
         # what's planned first, then the commercials (small, and they make the breaks), then the rest
@@ -1254,6 +1276,21 @@ class Station:
                 if self.fetch(show) is None:
                     self.bulk["failed"].append(show["title"])
                 self.bulk["done"] += 1
+            if scope == "all":
+                again, seen = [], set()
+                for show in everything:
+                    if slug(show) not in seen:
+                        seen.add(slug(show))
+                        if self.old_encode(show):
+                            again.append(show)
+                self.bulk["total"] += len(again)
+                for show in again:
+                    while self.urgent:
+                        time.sleep(1)
+                    self.bulk["current"] = f"{show['title']} (better quality)"
+                    if self.fetch(show, again=True) is None:
+                        self.bulk["failed"].append(show["title"])
+                    self.bulk["done"] += 1
             self.bulk["running"], self.bulk["current"] = False, None
             save("bulk.json", None)
 
