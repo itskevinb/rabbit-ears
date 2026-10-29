@@ -477,14 +477,18 @@ class Station:
             ok = (lambda base: lambda s: base(s) and self.length_of(s) <= within_s)(ok)
         bag = self.bags.setdefault(pool, [])
         bag[:] = [s for s in bag if s in shows]
-        for refill in (False, True):
-            if refill:
-                fresh = [s for s in shows for _ in range(2 if s.get("season") and in_season(s, when) else 1)]
-                random.shuffle(fresh)
-                bag[:] = fresh if len(bag) > 2 * len(shows) else bag + fresh
-            for i, show in enumerate(bag):
-                if ok(show) and (avoid is None or slug(show) != slug(avoid) or len(shows) == 1):
-                    return bag.pop(i)
+        # not one that's on now or already planned (a refill puts every show back), unless there's no other
+        busy = {slug(i["show"]) for i in self.plan if i["type"] == "show"} | ({slug(self.now)} if self.now else set())
+        for fresh_only in (True, False):
+            for refill in (False, True):
+                if refill:
+                    fresh = [s for s in shows for _ in range(2 if s.get("season") and in_season(s, when) else 1)]
+                    random.shuffle(fresh)
+                    bag[:] = fresh if len(bag) > 2 * len(shows) else bag + fresh
+                for i, show in enumerate(bag):
+                    if ok(show) and (avoid is None or slug(show) != slug(avoid) or len(shows) == 1) and \
+                            not (fresh_only and pool != "bumpers" and slug(show) in busy):
+                        return bag.pop(i)
         if within_s is not None:
             return None
         return random.choice([s for s in shows if in_season(s, when)] or shows)
@@ -498,6 +502,10 @@ class Station:
             return self.length_of(item["show"])
         anthem = self.durations.get(slug(ANTHEM), 190)
         return anthem + (8 if item["type"] == "signoff" else 6)
+
+    def left(self):
+        """Seconds left of the show on now (its guessed length while it downloads)."""
+        return (self.length or (self.length_of(self.now) if self.now and not self.now.get("special") else 0)) - self.pos
 
     def next_slot(self, when):
         """The first hour or half hour at or after `when`."""
@@ -517,7 +525,7 @@ class Station:
             last = self.plan[-1]
             end, after_show = last["at"] + timedelta(seconds=self.item_length(last)), last["type"] == "show"
         elif self.now:
-            end, after_show = now + timedelta(seconds=max(0, self.length - self.pos)), True
+            end, after_show = now + timedelta(seconds=max(0, self.left())), True
         else:
             end, after_show = now, False
         while end < now + timedelta(hours=hours) and len(self.plan) < 300:
@@ -603,7 +611,7 @@ class Station:
         t = now
         if self.now and not self.now.get("special") and self.mode == "lineup":
             row("show", self.now, now - timedelta(seconds=self.pos), self.length or self.length_of(self.now), on_now=True)
-            t = now + timedelta(seconds=max(0, self.length - self.pos) + gap)
+            t = now + timedelta(seconds=max(0, self.left()) + gap)
         for show in queue:
             row("show", show, t, self.length_of(show), queued=True)
             t += timedelta(seconds=self.length_of(show) + gap)
