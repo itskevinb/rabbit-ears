@@ -101,14 +101,21 @@
   .health dd { margin: 0; }
   .check { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; color: var(--text); font-size: 14px; }
   .check input { width: 18px; height: 18px; }
+  .channels { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+  .channels button { display: flex; align-items: center; gap: 10px; text-align: left; }
+  .channels button .num { width: 34px; height: 34px; border-radius: 50%; background: var(--line); color: var(--text);
+                          display: grid; place-items: center; font: 800 18px/1 system-ui; flex: none; }
+  .channels button.active { border-color: var(--accent); }
+  .channels button.active .num { background: var(--accent); color: #111; }
+  .channels small { display: block; color: var(--dim); }
   @media (max-width: 480px) { .grid2 { grid-template-columns: 1fr; } .stats { grid-template-columns: 1fr 1fr; } nav a { font-size: 12px; } }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <div class="logo">4</div>
-    <h1>CHANNEL 4</h1>
+    <div class="logo" id="logo">4</div>
+    <h1 id="name">CHANNEL 4</h1>
     <div class="meta"><span id="clock"></span><br><span id="block" class="badge"></span> <span id="mode" class="badge"></span></div>
   </header>
 
@@ -129,6 +136,11 @@
         <div class="bar"><div id="progress"></div></div>
         <div class="row"><span id="elapsed"></span></div>
       </div>
+    </section>
+
+    <section>
+      <h2>Channel</h2>
+      <div class="channels" id="channels"></div>
     </section>
 
     <section>
@@ -177,6 +189,7 @@
   <!-- ===== Lineup ===== -->
   <div class="page" id="page-lineup">
     <section>
+      <p class="note" id="lineupOf" style="margin:0 0 10px"></p>
       <div class="tabs">
         <button id="tab-day" onclick="tab='day'; renderLineup()">Daytime</button>
         <button id="tab-evening" onclick="tab='evening'; renderLineup()">Prime time</button>
@@ -355,12 +368,14 @@ async function refresh() {
 function render() {
   const s = state;
   $('clock').textContent = s.clock;
+  const ch = (s.channels || []).find(c => c.channel === s.channel);
+  if (ch) { $('logo').textContent = ch.number; $('name').textContent = ch.name.toUpperCase(); document.title = ch.name; }
   $('block').textContent = BLOCK[s.block] || 'Daytime';
   const m = $('mode');
   m.textContent = {lineup: 'On the air', standby: 'Standing by', testcard: 'Test pattern', off: 'Off the air'}[s.mode];
   m.className = 'badge ' + {lineup: 'on', standby: 'warn', testcard: 'warn', off: 'off'}[s.mode];
   for (const el of document.querySelectorAll('.bulk')) el.textContent = bulkText(s.bulk);
-  if (page === 'now') { renderNow(); renderEras(); }
+  if (page === 'now') { renderChannels(); renderNow(); renderEras(); }
   if (page === 'guide') loadGuide();
   if (page === 'lineup') renderLineup();
   if (page === 'downloads') renderDownloads();
@@ -421,6 +436,15 @@ function renderGuide(rows) {
   setHTML($('guideList'), html || '<li><span></span><span class="name"><small>Nothing planned.</small></span></li>');
 }
 
+function renderChannels() {
+  setHTML($('channels'), (state.channels || []).map(c => `<button class="${c.channel === state.channel ? 'active' : ''}" onclick="tune('${esc(c.channel)}')">
+    <span class="num">${esc(c.number)}</span><span>${esc(c.name)}<small>${c.on ? named(c.on) : c.channel === state.channel ? 'on now' : '&nbsp;'}</small></span></button>`).join(''));
+}
+function tune(channel) {
+  if (channel === state.channel) return;
+  post('/api/channel', {channel}).then(s => { if (s) { guideAt = 0; toast('Channel ' + (s.channels.find(c => c.channel === channel) || {}).number); } });
+}
+
 function renderEras() {
   const on = state.schedule.eras || [];
   setHTML($('eras'), `<button class="${on.length ? '' : 'active'}" onclick="setEras([])">All</button>` +
@@ -433,6 +457,8 @@ function setEras(eras) { saveSchedule({eras}, eras.length ? 'Era: ' + eras.sort(
 // ---- Lineup ----
 function renderLineup() {
   if (!state) return;
+  const ch = (state.channels || []).find(c => c.channel === state.channel);
+  $('lineupOf').textContent = ch ? `The lineup for ${ch.name} (${ch.number}). Switch channels on the Now page to edit another.` : '';
   for (const b of ['day', 'evening', 'night', 'bumpers']) {
     $('tab-' + b).classList.toggle('active', tab === b);
     $('tab-' + b).textContent = {...BLOCK, bumpers: 'Commercials'}[b] + ` (${(state.lineup[b] || []).length})`;
@@ -469,7 +495,7 @@ function plainLineup() {
                        ...(s.season ? {season: s.season} : {}), ...(s.block ? {block: s.block} : {}),
                        ...(s.start ? {start: s.start} : {}), ...(s.end ? {end: s.end} : {})});
   const list = b => (state.lineup[b] || []).map(strip);
-  return {day: list('day'), evening: list('evening'), night: list('night'), bumpers: list('bumpers'),
+  return {channel: state.channel, day: list('day'), evening: list('evening'), night: list('night'), bumpers: list('bumpers'),
           night_starts: state.lineup.night_starts, evening_starts: state.lineup.evening_starts ?? state.lineup.night_starts,
           night_ends: state.lineup.night_ends, schedule: {...state.schedule}};
 }

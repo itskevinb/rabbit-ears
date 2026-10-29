@@ -107,6 +107,7 @@ python3 tools/station.py --port=8080           # then open http://localhost:8080
 - It **plans a few hours ahead**, drawing each show for the time it will start: weekend mornings are cartoons only, and features wait for the afternoon. Each show is a cartoon, short, episode or feature (guessed from its length and title, or set by hand).
 - **On the clock:** a show that ends near the hour or half hour is followed by commercials until then, so the next one starts on time. With more room than the "most commercials in a row" setting, a short that fits goes in first (in prime time, from the daytime list too), the way stations filled odd minutes. The odd seconds left over get a "You're watching Channel 4" card.
 - Shows tagged **Halloween** or **Christmas** only play in season, and twice as often then.
+- **Channels:** besides Channel 4 (`lineup.json` in the cache), any `lineup-<number>.json` there is another channel with its own shows, commercials, schedule and name (`"number"`, `"name"`); a kids' channel of the daytime cartoons is made the first time. The set still gets one RF channel: switching happens on the Now page, or with `POST /api/channel` (`{"channel": "9"}`, or `{"step": 1}` / `{"step": -1}` for up and down the dial, from a home-automation button, say). Every channel keeps its own clock, so tuning back finds its show still on, joined part way through, the way turning the dial did.
 - **Eras:** pick one or more decades on the Now page (the 1930s and 1940s, say) and only shows and commercials from those years play; a block with nothing from them plays the daytime ones. Shows without a year play in any era.
 - **Commercial breaks:** "we'll be right back", then one or two vintage spots from the commercials list (or as many as fit, on the clock). A commercial can be for one block only. One can also be a stretch of a longer file (`start` and `end` in seconds): [`tools/reel.py`](tools/reel.py) cuts a reel of commercials into spots at the black frames between them and makes a contact sheet to name them by.
 - **Broadcast day:** at sign-off it plays *O Canada* (the Columbia Mixed Quartette, 1913) over the flag, holds the test pattern until sign-on, and plays it again in the morning.
@@ -116,7 +117,7 @@ python3 tools/station.py --port=8080           # then open http://localhost:8080
 
 The web page ([`tools/web/index.html`](tools/web/index.html)) is built for a phone:
 
-- **Now:** a live thumbnail, the remote (skip, mute, volume, stand by, test pattern, sign off), the play-next queue and what's coming up.
+- **Now:** a live thumbnail, the channels (with what's on each), the remote (skip, mute, volume, stand by, test pattern, sign off), the play-next queue and what's coming up.
 - **Guide:** the next 18 hours with estimated times.
 - **Lineup:** daytime, late night and commercials, with archive.org search, and each show's kind and season.
 - **Downloads:** what's cached, its size, and the space left.

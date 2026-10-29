@@ -38,7 +38,7 @@ CACHE.mkdir(parents=True, exist_ok=True)
 CLIPS = Path(os.environ.get("CHANNEL4_CLIPS") or CACHE)
 flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] if a.startswith("--")}
 
-DEFAULT_SETTINGS = {"fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False,
+DEFAULT_SETTINGS = {"channel": "4", "fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False,
                     "volume": 100, "cleanup": "strong", "smooth": True, "match_fps": True, "blend": True}
 
 # The broadcast day, kept in lineup.json next to the late-night hours.
@@ -136,6 +136,7 @@ def font(size):
 
 # ---- cards: drawn at 256x192, scaled to the board's picture size --------------
 BW, BH = 256, 192
+ON_AIR = {"number": 4, "name": "Channel 4"}  # the channel tuned in, for the cards
 
 
 def fit(img, resample=Image.BILINEAR):
@@ -146,8 +147,9 @@ def channel_card(*lines):
     img = Image.new("L", (BW, BH), 40)
     d = ImageDraw.Draw(img)
     d.ellipse([88, 10, 168, 90], fill=230, outline=0, width=4)
-    d.text((128, 50), "4", font=font(56), fill=0, anchor="mm")
-    d.text((128, 108), "CHANNEL 4", font=font(18), fill=230, anchor="mm")
+    number = str(ON_AIR["number"])
+    d.text((128, 50), number, font=font(56 if len(number) < 2 else 40), fill=0, anchor="mm")
+    d.text((128, 108), ON_AIR["name"].upper(), font=font(18), fill=230, anchor="mm")
     y = 136
     for text, size, shade in lines:
         while font(size).getlength(text) > BW - 16 and size > 9:
@@ -170,7 +172,7 @@ def test_pattern():
     d.ellipse([68, 36, 188, 156], fill=230, outline=0, width=4)
     d.line([128, 36, 128, 156], fill=0, width=2)
     d.line([68, 96, 188, 96], fill=0, width=2)
-    d.text((128, 76), "CHANNEL 4", font=font(16), fill=0, anchor="mm")
+    d.text((128, 76), ON_AIR["name"].upper(), font=font(16), fill=0, anchor="mm")
     d.text((128, 118), "TEST PATTERN", font=font(12), fill=0, anchor="mm")
     img = fit(img)
     d = ImageDraw.Draw(img)
@@ -263,8 +265,27 @@ class Interrupted(Exception):
 class Station:
     def __init__(self):
         self.lock = threading.Lock()
-        self.lineup = load("lineup.json", None) or json.loads((HERE / "lineup.json").read_text())
+        self.durations = load("durations.json", {})
+        # Channel 4 is lineup.json; any others are lineup-<number>.json, each with its own
+        # shows, schedule, shuffle and plan. Only one is on the set at a time: the
+        # remote switches, and each runs on its own clock, so you join what's on.
+        main = load("lineup.json", None) or json.loads((HERE / "lineup.json").read_text())
+        self.lineups = {str(main.setdefault("number", 4)): main}
+        for path in sorted(CACHE.glob("lineup-*.json")):
+            other = load(path.name, None)
+            if other and other.get("number"):
+                self.lineups[str(other["number"])] = other
+        if len(self.lineups) == 1:
+            kids = self.kids_channel(main)
+            self.lineups[str(kids["number"])] = kids
+            save(f"lineup-{kids['number']}.json", kids)
+        self.plans, self.bagsets = {}, {}  # channel -> its plan, its shuffles
+        self.airing = {}                   # channel -> {"show", "at"}: what it was playing when we left it
+        self.started = None                # when the show on now started (or would have, joined part way)
+        self.tuned = False                 # switched channels: join what's on the new one
         self.settings = {**DEFAULT_SETTINGS, **load("settings.json", {})}
+        self.ch = self.settings["channel"] if self.settings["channel"] in self.lineups else next(iter(self.lineups))
+        ON_AIR.update(number=self.lineup["number"], name=self.channel_name(self.lineup))
         self.volume_lut = volume_table(self.settings["volume"])
         self.tv = TV(flags.get("--host") or "tubetv.local", self.setup())
         self.mode = "lineup"            # lineup | standby | testcard | off
@@ -278,12 +299,9 @@ class Station:
         self.fetching = set()
         self.urgent = set()              # the next show's download, which goes ahead of a "download all"
         self.encoder = threading.Lock()  # one download at a time: shrinking is CPU-bound, and playback needs a core
-        self.durations = load("durations.json", {})
         self.framing = load("framing.json", {})  # slug -> {"crop", "fill"}: black bars to cut, zoom to fill
         self.resume = load("now.json", None)  # {"show", "pos"}: a restart picks the show up where it was
         self.bulk = None                      # progress of a "download all"
-        self.bags = {}                   # pool -> shuffled shows not played yet
-        self.plan = []                   # what comes after the queue: {"type": show|signoff|signon, "show", "at"}
         self.changed = threading.Event()
         self.flag = CACHE / "flag.png"
         flag_card().save(self.flag)
@@ -292,6 +310,90 @@ class Station:
 
     def setup(self):
         return setup_commands(self.settings["sound"], self.settings["dither"])
+
+    # -- channels -----------------------------------------------------------------
+    # The tuned channel's lineup, shuffles (pool -> shows not played yet) and plan
+    # (what comes after the queue: {"type": show|signoff|signon, "show", "at"}).
+    @property
+    def lineup(self):
+        return self.lineups[self.ch]
+
+    @property
+    def bags(self):
+        return self.bagsets.setdefault(self.ch, {})
+
+    @bags.setter
+    def bags(self, value):
+        self.bagsets[self.ch] = value
+
+    @property
+    def plan(self):
+        return self.plans.setdefault(self.ch, [])
+
+    @plan.setter
+    def plan(self, value):
+        self.plans[self.ch] = value
+
+    def kids_channel(self, main):
+        """A second channel to start with: the daytime cartoons, and the commercials
+        that aren't late-night only, all day, signing off at 8. (Only daytime: a late
+        movie not downloaded yet can pass for a cartoon until its length is known.)"""
+        night = main.get("night_starts", 22)
+        cartoons = [s for s in main.get("day", []) if self.kind(s) == "cartoon"]
+        return {"number": 9, "name": "Kids' Channel", "day": cartoons, "evening": [], "night": [],
+                "bumpers": [b for b in main.get("bumpers", []) if b.get("block", "day") == "day"],
+                "night_starts": night, "evening_starts": night, "night_ends": night,
+                "schedule": {"cartoon_mornings": False, "features_from": 12, "sign_off": 20, "sign_on": 6}}
+
+    @staticmethod
+    def channel_name(lineup):
+        return lineup.get("name") or f"Channel {lineup['number']}"
+
+    def numbers(self):
+        """The channels in dial order."""
+        return sorted(self.lineups, key=lambda ch: int(self.lineups[ch]["number"]))
+
+    def tune(self, ch=None, step=0):
+        """Switch channels, to one or `step` up or down the dial (round the end). The
+        one we leave keeps its clock: back on it later, its show is still on if it
+        hasn't ended."""
+        if step:
+            dial = self.numbers()
+            ch = dial[(dial.index(self.ch) + step) % len(dial)]
+        ch = str(ch)
+        if ch not in self.lineups:
+            return False
+        with self.lock:
+            if ch != self.ch:
+                if self.now and not self.now.get("special") and self.started:
+                    self.airing[self.ch] = {"show": self.now, "at": self.started}
+                self.ch = ch
+                ON_AIR.update(number=self.lineup["number"], name=self.channel_name(self.lineup))
+                self.tuned = True
+                self.settings = {**self.settings, "channel": ch}
+                save("settings.json", self.settings)
+        self.set_mode("lineup")
+        return True
+
+    def tune_in(self):
+        """What's on the channel just tuned to, and how far in: the show it was
+        playing if that hasn't ended, else the planned show whose time it is. What
+        aired while we were away is gone, like real TV. Or (None, 0): carry on."""
+        now = datetime.now()
+        with self.lock:
+            self.now = None
+            was = self.airing.pop(self.ch, None)
+            if was and was["at"] + timedelta(seconds=self.length_of(was["show"])) > now:
+                return was["show"], (now - was["at"]).total_seconds()
+            while self.plan and self.plan[0]["at"] + timedelta(seconds=self.item_length(self.plan[0])) <= now:
+                if self.plan[0]["type"] == "signoff" and self.off_air(now):
+                    self.signed_off = time.time()  # straight to the test pattern, no second anthem
+                    break
+                self.plan.pop(0)
+            if self.plan and self.plan[0]["type"] == "show" and self.plan[0]["at"] <= now:
+                item = self.plan.pop(0)
+                return item["show"], (now - item["at"]).total_seconds()
+        return None, 0.0
 
     # -- the schedule -------------------------------------------------------------
     # The station plans a few hours ahead (the TV guide shows the plan): each
@@ -681,7 +783,7 @@ class Station:
 
     # -- sending ----------------------------------------------------------------
     def interrupted(self):
-        return self.skip or self.override is not None or self.mode != "lineup"
+        return self.skip or self.tuned or self.override is not None or self.mode != "lineup"
 
     def send(self, gray, mulaw):
         if self.pending_setup:  # settings go down the same connection, from this thread
@@ -741,7 +843,7 @@ class Station:
             part()
         except Interrupted:
             pass
-        if self.override is not None or self.mode != "lineup":
+        if self.tuned or self.override is not None or self.mode != "lineup":
             raise Interrupted
         self.skip = False
 
@@ -779,7 +881,7 @@ class Station:
         if until:  # the odd seconds left, a minute at most (the show starts early rather than wait longer)
             self.now, self.pos = {"title": "Station break", "special": "break"}, 0
             stop = min(until - timedelta(seconds=UP_NEXT), datetime.now() + timedelta(seconds=60))
-            self.segment(lambda: self.hold(channel_card(("YOU'RE WATCHING", 13, 170), ("CHANNEL 4", 20, 230)),
+            self.segment(lambda: self.hold(channel_card(("YOU'RE WATCHING", 13, 170), (ON_AIR["name"].upper(), 20, 230)),
                                            until=lambda: datetime.now() >= stop or self.interrupted()))
 
     def anthem(self):
@@ -815,8 +917,8 @@ class Station:
         on = self.sign_on_time(datetime.now())
         self.now, self.pos, self.length = {"title": f"Off the air until {on:%-I %p}", "special": "offair"}, 0, 0
         self.hold(test_pattern(), until=lambda: datetime.now() >= on or not self.off_air(datetime.now())
-                  or self.override is not None or self.mode != "lineup")
-        if self.override is not None or self.mode != "lineup":
+                  or self.tuned or self.override is not None or self.mode != "lineup")
+        if self.tuned or self.override is not None or self.mode != "lineup":
             raise Interrupted
 
     def sign_on(self):
@@ -825,7 +927,7 @@ class Station:
         self.now, self.pos, self.length = {"title": "Sign-on", "special": "signon"}, 0, 0
         self.segment(self.anthem)
         self.now = {"title": "Sign-on", "special": "signon"}
-        self.segment(lambda: self.hold(channel_card(("GOOD MORNING", 20, 230), ("Channel 4 is on the air", 13, 170)),
+        self.segment(lambda: self.hold(channel_card(("GOOD MORNING", 20, 230), (f"{ON_AIR['name']} is on the air", 13, 170)),
                                        seconds=6, until=self.interrupted))
 
     def run(self):
@@ -843,7 +945,7 @@ class Station:
                 if self.mode == "off":
                     self.now = None
                     self.changed.clear()
-                    self.hold(channel_card(("GOOD NIGHT", 22, 230), ("Channel 4 is off the air", 12, 170)),
+                    self.hold(channel_card(("GOOD NIGHT", 22, 230), (f"{ON_AIR['name']} is off the air", 12, 170)),
                               seconds=6, until=lambda: self.mode != "off")
                     self.hold(bytes(W * H), seconds=1)  # then black and silence
                     while self.mode == "off":
@@ -856,6 +958,11 @@ class Station:
                         current = self.queue.pop(0)
                         save("queue.json", self.queue)
                 start_at = 0.0
+                if self.tuned:  # a new channel: join what's on (the queue still goes first)
+                    self.tuned = False
+                    self.resume = None
+                    if current is None:
+                        current, start_at = self.tune_in()
                 if current is None and self.resume and self.mode == "lineup":
                     current, start_at, self.resume = self.resume["show"], float(self.resume["pos"]), None
                 item = None
@@ -881,6 +988,8 @@ class Station:
                     played = False
                     self.commercial_break(until=item["at"] if item and item.get("fill") else None)
                 self.now, self.pos, self.length = current, start_at, self.duration(current)
+                # when it started (or would have), so leaving the channel and coming back finds it still on
+                self.started = datetime.now() - timedelta(seconds=start_at)
                 if not self.path(current).exists():  # first time: stand by while it downloads
                     done = threading.Event()
                     threading.Thread(target=lambda: (self.fetch(current), done.set()), daemon=True).start()
@@ -935,11 +1044,29 @@ class Station:
                 "queue": [show(q) for q in self.queue],
                 "pos": round(self.pos), "length": round(self.length), "settings": self.settings,
                 "lineup": {**self.lineup, **lineup}, "fetching": sorted(self.fetching), "bulk": self.bulk,
-                "clock": datetime.now().strftime("%H:%M"),
+                "clock": datetime.now().strftime("%H:%M"), "channel": self.ch, "channels": self.channels(),
                 "eras": {e: sum(decade(s) == e for p in POOLS for s in self.lineup.get(p, [])) for e in ERAS}}
 
+    def channels(self):
+        """Each channel, with what's on it now (the others: what they were playing,
+        or their plan's show for now; None when it's not known)."""
+        now, out = datetime.now(), []
+        for ch in self.numbers():
+            lineup, on = self.lineups[ch], None
+            if ch == self.ch:
+                on = self.now
+            elif self.airing.get(ch) and self.airing[ch]["at"] + timedelta(seconds=self.length_of(self.airing[ch]["show"])) > now:
+                on = self.airing[ch]["show"]
+            else:
+                on = next((i.get("show") for i in self.plans.get(ch, [])
+                           if i["at"] <= now < i["at"] + timedelta(seconds=self.item_length(i))), None)
+            out.append({"channel": ch, "number": lineup["number"], "name": self.channel_name(lineup),
+                        "on": on and {"title": on["title"], "year": on.get("year", "")}})
+        return out
+
     def everything(self):
-        return [s for k in (*POOLS, "bumpers") for s in self.lineup.get(k, [])]
+        """Every show and commercial on every channel."""
+        return [s for lineup in self.lineups.values() for k in (*POOLS, "bumpers") for s in lineup.get(k, [])]
 
     def find(self, key):
         for s in self.everything():
@@ -959,7 +1086,12 @@ class Station:
         return show is not None
 
     def set_lineup(self, lineup):
-        sc = self.schedule()
+        """Replace a channel's lineup (the one tuned in, unless it says which)."""
+        ch = str(lineup.get("channel") or self.ch)
+        if ch not in self.lineups:
+            raise ValueError("no such channel")
+        old = self.lineups[ch]
+        sc = {**DEFAULT_SCHEDULE, **old.get("schedule", {})}
         for k, v in (lineup.get("schedule") or {}).items():
             if k in ("cartoon_mornings", "off_air"):
                 sc[k] = bool(v)
@@ -974,7 +1106,8 @@ class Station:
             elif k in DEFAULT_SCHEDULE:
                 sc[k] = int(v) % 24
         night = int(lineup["night_starts"]) % 24
-        clean = {**{k: [] for k in (*POOLS, "bumpers")}, "night_starts": night,
+        clean = {"number": old["number"], **({"name": old["name"]} if old.get("name") else {}),
+                 **{k: [] for k in (*POOLS, "bumpers")}, "night_starts": night,
                  "evening_starts": int(lineup.get("evening_starts", night)) % 24,
                  "night_ends": int(lineup["night_ends"]) % 24, "schedule": sc}
         for block in (*POOLS, "bumpers"):
@@ -991,10 +1124,9 @@ class Station:
                     show["block"] = s["block"]  # a commercial for one block only
                 clean[block].append(show)
         with self.lock:
-            self.lineup = clean
-            self.bags = {}
-            self.plan = []
-        save("lineup.json", clean)
+            self.lineups[ch] = clean
+            self.bagsets[ch], self.plans[ch] = {}, []
+        save("lineup.json" if ch == next(iter(self.lineups)) else f"lineup-{ch}.json", clean)
 
     def set_settings(self, new):
         s = {**self.settings}
@@ -1152,6 +1284,9 @@ class Remote(BaseHTTPRequestHandler):
                     return self.reply(404, {"error": "no such show"})
             elif path == "/api/lineup":
                 station.set_lineup(b)
+            elif path == "/api/channel":
+                if not station.tune(b.get("channel", ""), step=int(b.get("step") or 0)):
+                    return self.reply(404, {"error": "no such channel"})
             elif path == "/api/settings":
                 station.set_settings(b)
             elif path == "/api/queue":
