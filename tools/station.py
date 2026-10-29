@@ -842,6 +842,8 @@ class Station:
                             self.sign_on()
                         continue
                     current = item["show"]
+                # the plan runs on from the end of this show (a resumed one too), so set it first
+                self.now, self.pos, self.length = current, start_at, self.duration(current)
                 self.upcoming = self.peek()
                 if self.upcoming:
                     threading.Thread(target=self.fetch, args=(self.upcoming,), daemon=True).start()
