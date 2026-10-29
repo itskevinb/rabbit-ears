@@ -62,7 +62,7 @@ CHANNEL_CARD = 3       # seconds of the channel's card when you switch to it
 # Stills go out no brighter than this. The set takes its sound from the beat between
 # the picture and sound carriers, and white is the weakest picture carrier (negative
 # AM): a still card with big white areas and no soundtrack to cover it buzzed.
-CARD_WHITE = 160
+CARD_WHITE = 128
 DIM = bytes(min(v, CARD_WHITE) for v in range(256))
 # The board takes at most 800 audio samples a packet (AUD_MAX), so at 15625 Hz
 # nothing may go out under 20 fps: a 15 fps show sent as-is had every packet
