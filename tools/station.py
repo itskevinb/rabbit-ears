@@ -57,6 +57,7 @@ GUESS = {"cartoon": 420, "short": 1020, "episode": 1560, "feature": 4800, "bumpe
 SEASONS = {"halloween": ((10, 1), (10, 31)), "christmas": ((12, 1), (12, 26))}
 # Columbia Mixed Quartette, recorded 24 May 1913 (Columbia A1369): public domain.
 ANTHEM = {"title": "O Canada", "year": 1913, "item": "OCanada_284", "file": "OCanada.mp3"}
+OVER_MAX = 60  # seconds a break between shows may run over so its last commercial plays to the end
 IDENT, UP_NEXT = 4, 5  # seconds: "we'll be right back" before commercials, "up next" before a show
 SLOT = 30 * 60         # on the clock, shows start on the hour and the half hour
 CHANNEL_CARD = 3       # seconds of the channel's card when you switch to it
@@ -529,7 +530,7 @@ class Station:
 
     def break_length(self):
         n = BREAKS.get(self.schedule()["breaks"], 0)
-        return IDENT + n if n and self.lineup.get("bumpers") else 0
+        return IDENT + n + OVER_MAX // 2 if n and self.lineup.get("bumpers") else 0  # the last spot runs over
 
     def item_length(self, item):
         if item["type"] == "show":
@@ -921,7 +922,8 @@ class Station:
 
     def commercial_break(self, until=None):
         """'We'll be right back', then commercials from the bumpers list back to
-        back: as many as fill the break's minutes (a few seconds over is fine), or
+        back until the break's minutes are used, the last one always played to
+        its end (up to OVER_MAX past the break), or
         with `until` (on the clock) as many as fit before then and the station's
         card for the odd seconds left. One that isn't downloaded yet is fetched
         for next time."""
@@ -929,10 +931,10 @@ class Station:
         n = BREAKS.get(self.schedule()["breaks"], 0)
         if not bumpers or (not until and not n):
             return
-        if until:
-            left, enough = (until - datetime.now()).total_seconds() - IDENT - UP_NEXT, 10
-        else:  # a spot may run 20 s past the break; under 25 s left, it's full
-            left, enough = n + 20, 25
+        if until:  # the show starts on the clock: every spot fits
+            left, enough, over = (until - datetime.now()).total_seconds() - IDENT - UP_NEXT, 10, 0
+        else:  # under 15 s left, the break is full
+            left, enough, over = n, 15, OVER_MAX
         ads, tries = [], 0
         while tries < 4 * len(bumpers) and left >= enough:
             tries += 1
@@ -941,7 +943,7 @@ class Station:
                 break
             if not self.path(ad).exists():
                 threading.Thread(target=self.fetch, args=(ad,), daemon=True).start()
-            elif self.duration(ad) <= left:
+            elif self.duration(ad) <= left + over:
                 ads.append(ad)
                 left -= self.duration(ad)
         if not ads and (not until or left > 60):  # nothing downloaded yet: don't sit on a card
