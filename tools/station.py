@@ -50,7 +50,7 @@ DEFAULT_SCHEDULE = {"cartoon_mornings": True, "mornings_from": 7, "mornings_to":
                     "on_the_clock": True, "fill_max": 10,                # shows start on the hour and half hour
                     "eras": []}                                          # decades to play (1960, ...); none: all
 ERAS = (1920, 1930, 1940, 1950, 1960, 1970)
-BREAKS = {"off": 0, "light": 1, "classic": 2}
+BREAKS = {"off": 0, "light": 60, "classic": 120, "long": 180}  # seconds of commercials between shows
 POOLS = ("day", "evening", "night")  # the blocks shows are drawn from; "bumpers" are the commercials
 KINDS = ("cartoon", "short", "episode", "feature")
 GUESS = {"cartoon": 420, "short": 1020, "episode": 1560, "feature": 4800, "bumper": 60}  # seconds, until downloaded
@@ -529,7 +529,7 @@ class Station:
 
     def break_length(self):
         n = BREAKS.get(self.schedule()["breaks"], 0)
-        return IDENT + n * GUESS["bumper"] if n and self.lineup.get("bumpers") else 0
+        return IDENT + n if n and self.lineup.get("bumpers") else 0
 
     def item_length(self, item):
         if item["type"] == "show":
@@ -920,29 +920,31 @@ class Station:
         self.skip = False
 
     def commercial_break(self, until=None):
-        """'We'll be right back', then one or two commercials from the bumpers
-        list, or with `until` (on the clock) as many as fit before then and the
-        station's card for the odd seconds left. One that isn't downloaded yet is
-        fetched for next time."""
+        """'We'll be right back', then commercials from the bumpers list back to
+        back: as many as fill the break's minutes (a few seconds over is fine), or
+        with `until` (on the clock) as many as fit before then and the station's
+        card for the odd seconds left. One that isn't downloaded yet is fetched
+        for next time."""
         bumpers = self.lineup.get("bumpers")
         n = BREAKS.get(self.schedule()["breaks"], 0)
-        left = (until - datetime.now()).total_seconds() - IDENT - UP_NEXT if until else None
-        if not bumpers or (left is None and not n):
+        if not bumpers or (not until and not n):
             return
+        if until:
+            left, enough = (until - datetime.now()).total_seconds() - IDENT - UP_NEXT, 10
+        else:  # a spot may run 20 s past the break; under 25 s left, it's full
+            left, enough = n + 20, 25
         ads, tries = [], 0
-        while tries < 4 * len(bumpers) and (len(ads) < n if left is None else left >= 10):
+        while tries < 4 * len(bumpers) and left >= enough:
             tries += 1
             ad = self.draw("bumpers", datetime.now(), avoid=ads[-1] if ads else None, rules=False)
             if not ad:
                 break
             if not self.path(ad).exists():
                 threading.Thread(target=self.fetch, args=(ad,), daemon=True).start()
-            elif left is None:
-                ads.append(ad)
             elif self.duration(ad) <= left:
                 ads.append(ad)
                 left -= self.duration(ad)
-        if not ads and (left is None or left > 60):  # nothing downloaded yet: don't sit on a card
+        if not ads and (not until or left > 60):  # nothing downloaded yet: don't sit on a card
             return
         self.now, self.pos, self.length = {"title": "Commercial break", "special": "break"}, 0, 0
         self.segment(lambda: self.hold(channel_card(("WE'LL BE RIGHT BACK", 16, 230), ("after these messages", 12, 170)),
