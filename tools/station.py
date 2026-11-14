@@ -40,7 +40,7 @@ flags = {a.split("=", 1)[0]: (a.split("=", 1) + [""])[1] for a in sys.argv[1:] i
 
 DEFAULT_SETTINGS = {"channel": "4", "fps": 24, "sound": "w4", "dither": True, "brightness": 0.0, "contrast": 1.0, "muted": False,
                     "volume": 100, "cleanup": "strong", "smooth": True, "match_fps": True, "blend": True,
-                    "linearity": 0.0}
+                    "linearity": 0.0, "white": 12.5}
 
 # The broadcast day, kept in lineup.json next to the late-night hours.
 DEFAULT_SCHEDULE = {"cartoon_mornings": True, "mornings_from": 7, "mornings_to": 12,  # weekend mornings: cartoons only
@@ -343,7 +343,7 @@ class Station:
         self.signed_off = 0.0            # when the last sign-off ran (one O Canada a night)
 
     def setup(self):
-        return setup_commands(self.settings["sound"], self.settings["dither"])
+        return setup_commands(self.settings["sound"], self.settings["dither"], self.settings["white"])
 
     # -- channels -----------------------------------------------------------------
     # The tuned channel's lineup, shuffles (pool -> shows not played yet) and plan
@@ -873,7 +873,8 @@ class Station:
         """Send a still frame (with silence) for a while, or until `until()` says stop."""
         fps = self.settings["fps"]
         # vertical linearity (shows get it in Source, before their dither)
-        gray, n = remap(gray.translate(DIM), self.rows), 0
+        # cards are held to mid-grey against buzz, unless the board's white floor is raised
+        gray, n = remap(gray.translate(DIM) if self.settings["white"] <= 12.5 else gray, self.rows), 0
         while (seconds is None or n < seconds * fps) and not (until and until()):
             self.send(gray, bytes([SILENCE]) * audio_share(n, fps))
             n += 1
@@ -1222,12 +1223,13 @@ class Station:
         self.rows = row_map(s["linearity"])
         s["sound"] = new.get("sound", s["sound"]) if new.get("sound") in SOUND_METHODS else s["sound"]
         s["dither"] = bool(new.get("dither", s["dither"]))
+        s["white"] = max(12.5, min(37.5, float(new.get("white", s["white"]))))
         s["brightness"] = max(-0.5, min(0.5, float(new.get("brightness", s["brightness"]))))
         s["contrast"] = max(0.3, min(3.0, float(new.get("contrast", s["contrast"]))))
         s["cleanup"] = new.get("cleanup", s["cleanup"]) if new.get("cleanup") in CLEANUP else s["cleanup"]
         picture = any(s[k] != self.settings[k] for k in ("fps", "match_fps", "smooth", "blend", "brightness", "contrast",
                                                          "cleanup", "linearity"))  # reopen the source
-        board = any(s[k] != self.settings[k] for k in ("sound", "dither"))
+        board = any(s[k] != self.settings[k] for k in ("sound", "dither", "white"))
         self.settings = s
         save("settings.json", s)
         if board:

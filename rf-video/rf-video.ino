@@ -87,7 +87,12 @@ const int SLOTS = LINE_BITS / 2;                         // picture pulse slots 
 const int LINES = 262, VSYNC_LINES = 3, FIRST_ACTIVE = 20, LAST_ACTIVE = 259;
 const float SLOTS_PER_US = BIT_RATE / 2 / 1e6f;
 const float HSYNC_US = 4.7, BACK_PORCH_US = 4.7, FRONT_PORCH_US = 1.5, SAFE = 0.90;
-const int SYNC = 256, BLACK = 192, WHITE = 32;  // carrier strength, 256 = every pulse
+const int SYNC = 256, BLACK = 192;  // carrier strength, 256 = every pulse
+// White's carrier strength: NTSC's 12.5% (32) by default. The set's sound comes
+// from beating the sound carrier against the picture carrier (intercarrier), so
+// a weak white carrier buzzes; the station can raise it with "CL" + one byte.
+const int WHITE_MIN = 32, WHITE_MAX = 96;
+volatile int white = 32;
 
 #if CONFIG_IDF_TARGET_ESP32S3
 // One picture row per visible line (216 of the 240 active ones show, SAFE), and
@@ -197,6 +202,25 @@ int ulaw_to_linear(uint8_t u) {  // G.711, +/-32124
   return u & 0x80 ? 0x84 - t : t - 0x84;
 }
 
+// The pixel runs' bits for the current white level. Rebuilt in place when the
+// station changes it: a line or two drawn mid-rebuild mixes old and new levels.
+void build_run_lut() {
+  int w = white;
+  for (int v = 0; v < 16; v++)
+    for (int a0 = 0; a0 < 256; a0++)
+      for (int len = RUN_MIN; len <= RUN_MAX; len++) {
+        int a = a0;
+        uint32_t bits = 0;
+        for (int i = 0; i < len; i++) {
+          a += BLACK - v * (BLACK - w) / 15;
+          int bit = a >> 8;
+          a -= bit << 8;
+          bits = (bits << 2) | (bit << 1);
+        }
+        run_lut[(len - RUN_MIN) << 12 | v << 8 | a0] = bits << 8 | a;
+      }
+}
+
 void build_tables() {
   float start = HSYNC_US + BACK_PORCH_US, end = SLOTS / SLOTS_PER_US - FRONT_PORCH_US;
   uint16_t vsync_src[SLOTS];
@@ -239,19 +263,7 @@ void build_tables() {
   prefix_tail_bits = (first % 16) * 2;
   prefix_tail = word & ((1ull << prefix_tail_bits) - 1);
   prefix_acc = acc;
-  for (int v = 0; v < 16; v++)
-    for (int a0 = 0; a0 < 256; a0++)
-      for (int len = RUN_MIN; len <= RUN_MAX; len++) {
-        int a = a0;
-        uint32_t bits = 0;
-        for (int i = 0; i < len; i++) {
-          a += BLACK - v * (BLACK - WHITE) / 15;
-          int bit = a >> 8;
-          a -= bit << 8;
-          bits = (bits << 2) | (bit << 1);
-        }
-        run_lut[(len - RUN_MIN) << 12 | v << 8 | a0] = bits << 8 | a;
-      }
+  build_run_lut();
   // 72 MHz = 8 x pulse rate, so a deviation d moves the pulse rate by d/8.
   for (int i = 0; i < 256; i++) {
     float dev = ulaw_to_linear(i) / 32768.0f * 25000.0f;  // tables are indexed by the mu-law code
@@ -273,8 +285,8 @@ void build_tables() {
 void slow_picture_line(const uint8_t *rp, uint32_t *w) {
   int pal[VID_W + 2];
   for (int x = 0; x < VID_W; x += 2) {
-    pal[x] = BLACK - (rp[x >> 1] >> 4) * (BLACK - WHITE) / 15;
-    pal[x + 1] = BLACK - (rp[x >> 1] & 15) * (BLACK - WHITE) / 15;
+    pal[x] = BLACK - (rp[x >> 1] >> 4) * (BLACK - white) / 15;
+    pal[x + 1] = BLACK - (rp[x >> 1] & 15) * (BLACK - white) / 15;
   }
   pal[PAL_SYNC] = SYNC;
   pal[PAL_BLACK] = BLACK;
@@ -562,9 +574,9 @@ const char *reset_name() {
 
 template <typename Link> void send_status(Link &out) {
   char msg[160];
-  snprintf(msg, sizeof(msg), "#status up %lu reset %s heap %u minheap %u rssi %d load %u/%u/%u joins %u size %dx%d\n",
+  snprintf(msg, sizeof(msg), "#status up %lu reset %s heap %u minheap %u rssi %d load %u/%u/%u joins %u size %dx%d white %d\n",
            (unsigned long)(millis() / 1000), reset_name(), ESP.getFreeHeap(), ESP.getMinFreeHeap(), WiFi.RSSI(),
-           pic_pct, sound_pct, inflate_pct, wifi_joins, VID_W, VID_H);
+           pic_pct, sound_pct, inflate_pct, wifi_joins, VID_W, VID_H, white);
   out.print(msg);
 }
 
@@ -594,7 +606,7 @@ template <typename Link> void receive(Link &in, int &matched) {
     // the data never ran out, the loop never returned, and core 0's idle task
     // starved (task watchdog). Between packets, so nothing is cut in half.
     if (millis() - start > 20) return;
-    if (matched != 4) {  // 1 = saw A5, 2 = A5 5A, 3 = "V", 4 = "V2", 5 = "C"
+    if (matched != 4) {  // 1 = saw A5, 2 = A5 5A, 3 = "V", 4 = "V2", 5 = "C", 6 = "CL"
       int c = in.read();
       if (matched == 5) {
         if (c == 'H') ESP.restart();
@@ -606,6 +618,10 @@ template <typename Link> void receive(Link &in, int &matched) {
         if (c == 'D' || c == 'd') line_dither = c == 'D';
         if (c == 'T') throughput_test(in);
         if (c == 'S') send_status(in);
+        matched = c == 'L' ? 6 : 0;  // "L" + one byte: white's carrier strength
+      } else if (matched == 6) {
+        int w = c < WHITE_MIN ? WHITE_MIN : c > WHITE_MAX ? WHITE_MAX : c;
+        if (w != white) white = w, build_run_lut();
         matched = 0;
       } else if (matched == 2 && c == 'C') matched = 5;
       else if (matched == 2 && c == 'V') matched = 3;

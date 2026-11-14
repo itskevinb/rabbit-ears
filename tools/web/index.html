@@ -256,6 +256,10 @@
       <label>Highest frame rate: <b id="fpsV"></b> fps</label><input type="range" id="fps" min="20" max="30" step="1">
       <label>Brightness: <b id="brightnessV"></b></label><input type="range" id="brightness" min="-0.5" max="0.5" step="0.05">
       <label>Contrast: <b id="contrastV"></b></label><input type="range" id="contrast" min="0.3" max="3" step="0.05">
+      <label>White floor: <b id="whiteV"></b>% of the carrier</label><input type="range" id="white" min="12.5" max="37.5" step="2.5">
+      <p class="note">How much picture carrier is left at white. The set gets its sound from the picture carrier, so
+        bright scenes buzz and get noisy when there's too little. 12.5% is the broadcast standard; raise it until bright
+        scenes stop buzzing (whites go a little greyer). Above 12.5 the station cards show full white too. It changes as you slide.</p>
       <label>Vertical linearity: <b id="linearityV"></b></label><input type="range" id="linearity" min="-1" max="1" step="0.05">
       <p class="note">Old tubes spread the lines at the top of the screen further apart than at the bottom. Put up the
         test pattern and slide this until its circle is round: right squeezes the top half, left the bottom half; the
@@ -641,7 +645,12 @@ function renderHealth() {
     : 'The board\'s own numbers (uptime, why it last restarted, memory, signal) appear here once it runs the new firmware.';
 }
 
-let volumeTimer, linearityTimer;
+let volumeTimer, linearityTimer, whiteTimer;
+$('white').oninput = () => {  // live: tuned by ear and eye on a bright scene
+  $('whiteV').textContent = $('white').value;
+  clearTimeout(whiteTimer);
+  whiteTimer = setTimeout(() => post('/api/settings', {white: +$('white').value}), 200);
+};
 $('linearity').oninput = () => {  // live, like the volume: tuned by eye against the test pattern
   $('linearityV').textContent = $('linearity').value;
   clearTimeout(linearityTimer);
@@ -656,6 +665,7 @@ const sliders = ['fps', 'brightness', 'contrast'];
 function loadSettings() {
   const s = state.settings;
   for (const k of sliders) { $(k).value = s[k]; $(k + 'V').textContent = s[k]; }
+  if (document.activeElement !== $('white')) { $('white').value = s.white ?? 12.5; $('whiteV').textContent = s.white ?? 12.5; }
   if (document.activeElement !== $('linearity')) { $('linearity').value = s.linearity || 0; $('linearityV').textContent = s.linearity || 0; }
   $('sound').value = s.sound; $('dither').value = s.dither ? '1' : '0'; $('cleanup').value = s.cleanup;
   $('smooth').value = s.smooth ? '1' : '0'; $('matchFps').value = s.match_fps ? '1' : '0';

@@ -22,8 +22,12 @@ def cmd(letter):
     return bytes([0xA5, 0x5A, ord("C"), ord(letter)])
 
 
-def setup_commands(sound="w4", dither=True):
-    return cmd(SOUND_METHODS[sound]) + cmd("D" if dither else "d")
+def setup_commands(sound="w4", dither=True, white=12.5):
+    """The board's settings; `white` is white's share of the picture carrier in %
+    (NTSC's 12.5 up to 37.5: higher buzzes less on bright scenes, at some contrast).
+    Firmware without the "L" command ignores it."""
+    level = max(32, min(96, round(white * 2.56)))
+    return cmd(SOUND_METHODS[sound]) + cmd("D" if dither else "d") + cmd("L") + bytes([level])
 
 
 # 4x4 ordered dither down to the 16 levels the board shows: smooth shading
